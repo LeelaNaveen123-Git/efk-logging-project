@@ -1,0 +1,73 @@
+
+# Fluent Bit chart: 0.58.3
+# Collect Kubernetes container logs and forward them to ECK Elasticsearch.
+
+kind: DaemonSet
+
+image:
+  repository: cr.fluentbit.io/fluent/fluent-bit
+  tag: "5.1.3"
+
+serviceAccount:
+  create: true
+  name: fluent-bit
+
+rbac:
+  create: true
+  nodeAccess: false
+
+env:
+  - name: ES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: logs-es-elastic-user
+        key: elastic
+
+extraVolumes:
+  - name: elasticsearch-ca
+    secret:
+      secretName: logs-es-http-certs-public
+      items:
+        - key: ca.crt
+          path: ca.crt
+
+extraVolumeMounts:
+  - name: elasticsearch-ca
+    mountPath: /fluent-bit/certs
+    readOnly: true
+
+config:
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 10MB
+        Skip_Long_Lines On
+        Refresh_Interval 5
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+  outputs: |
+    [OUTPUT]
+        Name es
+        Match kube.*
+        Host logs-es-http.logging.svc
+        Port 9200
+        HTTP_User elastic
+        HTTP_Passwd ${ES_PASSWORD}
+        tls On
+        tls.verify On
+        tls.ca_file /fluent-bit/certs/ca.crt
+        Logstash_Format On
+        Logstash_Prefix kubernetes
+        Suppress_Type_Name On
+        Retry_Limit False
