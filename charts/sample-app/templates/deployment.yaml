@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "sample-app.fullname" . }}
@@ -40,18 +40,23 @@ spec:
             httpGet:
               path: /health
               port: http
-            failureThreshold: 15
-            periodSeconds: 2
+            timeoutSeconds: 3
+            periodSeconds: 5
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /ready
               port: http
+            timeoutSeconds: 3
             periodSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: http
+            timeoutSeconds: 3
             periodSeconds: 10
+            failureThreshold: 3
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       tolerations:
