@@ -60,6 +60,7 @@ config:
         Annotations Off
         K8S-Logging.Parser Off
         K8S-Logging.Exclude On
+        Buffer_Size 256KB
 
   outputs: |
     [OUTPUT]
