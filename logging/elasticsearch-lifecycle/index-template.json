@@ -1,0 +1,11 @@
+﻿{
+  "index_patterns": [
+    "kubernetes-v2-*"
+  ],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "kubernetes-logs-7d"
+    }
+  }
+}

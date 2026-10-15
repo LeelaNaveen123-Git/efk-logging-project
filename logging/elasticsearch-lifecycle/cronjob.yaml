@@ -1,0 +1,47 @@
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: elasticsearch-lifecycle
+  namespace: logging
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: apply-lifecycle
+              image: curlimages/curl:8.12.1
+              command:
+                - /bin/sh
+                - /config/apply-lifecycle.sh
+              env:
+                - name: ES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: logs-es-elastic-user
+                      key: elastic
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+                - name: certificates
+                  mountPath: /certs
+                  readOnly: true
+          volumes:
+            - name: config
+              configMap:
+                name: elasticsearch-lifecycle-config
+                defaultMode: 0444
+            - name: certificates
+              secret:
+                secretName: logs-es-http-certs-public
+                items:
+                  - key: ca.crt
+                    path: ca.crt
