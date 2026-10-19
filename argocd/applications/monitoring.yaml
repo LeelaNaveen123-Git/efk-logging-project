@@ -18,6 +18,7 @@ spec:
         alertmanager:
           enabled: false
 
+        
         grafana:
           admin:
             existingSecret: monitoring-grafana-admin
@@ -32,9 +33,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-         grafana.ini:
+          grafana.ini:
             plugins:
               preinstall_auto_update: false
+
 
         prometheus:
           prometheusSpec:
