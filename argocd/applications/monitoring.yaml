@@ -32,7 +32,7 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          ini:
+         grafana.ini:
             plugins:
               preinstall_auto_update: false
 
