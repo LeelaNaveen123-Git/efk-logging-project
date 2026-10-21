@@ -48,9 +48,8 @@ config:
         multiline.parser docker, cri
         Tag kube.*
         Mem_Buf_Limit 10MB
-        Skip_Long_Lines On  #Tail plugin to skip lines that exceed its supported line size instead of allowing a single oversized line to stop normal processing of that file.
-        Refresh_Interval 5  #This sets the Tail plugin's file-discovery refresh interval to five seconds.
-
+        Skip_Long_Lines On  
+        Refresh_Interval 5  
   filters: |
     [FILTER]
         Name kubernetes
@@ -77,4 +76,4 @@ config:
         Logstash_Format On
         Logstash_Prefix kubernetes-v2
         Suppress_Type_Name On
-        Retry_Limit False  #This configures unlimited retries for failed output delivery, rather than stopping after a fixed retry count.
+        Retry_Limit False  
