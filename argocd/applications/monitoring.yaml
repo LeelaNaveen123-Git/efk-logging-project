@@ -2,15 +2,15 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: monitoring
-  namespace: argocd
+name: monitoring # name of application 
+  namespace: argocd #means the Application resource itself is stored in the argocd namespace.
 
 spec:
-  project: default
+  project: default #refers to the Argo CD AppProject that controls which repositories, destinations, and resource types the application is permitted to use.
 
-  source:
-    repoURL: https://prometheus-community.github.io/helm-charts
-    chart: kube-prometheus-stack
+  source: 
+    repoURL: https://prometheus-community.github.io/helm-charts #Location of the Prometheus Community Helm chart repository
+    chart: kube-prometheus-stack #Name of the chart to install
     targetRevision: "89.2.0"
     helm:
       releaseName: monitoring
@@ -18,14 +18,14 @@ spec:
         alertmanager:
           enabled: false
 
-        
-        grafana:
+    
+        grafana: #This configures Grafana to obtain its administrator credentials from an existing Kubernetes Secret.
           admin:
-            existingSecret: monitoring-grafana-admin
-            userKey: admin-user
-            passwordKey: admin-password
-          persistence:
-            enabled: false
+            existingSecret: monitoring-grafana-admin #Name of the Kubernetes Secret
+            userKey: admin-user  #Key holding the administrator username
+            passwordKey: admin-password #Key holding the administrator password
+          persistence: #This disables persistent storage for Grafana.
+            enabled: false 
           resources:
             requests:
               cpu: 100m
@@ -33,7 +33,7 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          grafana.ini:
+          grafana.ini: #This sets a Grafana configuration option that disables automatic updates for plugins installed through the applicable plugin preinstallation mechanism.
             plugins:
               preinstall_auto_update: false
 
@@ -41,7 +41,7 @@ spec:
         prometheus:
           prometheusSpec:
             retention: 3d
-            retentionSize: 2GB
+            retentionSize: 2GB 
             resources:
               requests:
                 cpu: 200m
@@ -50,7 +50,7 @@ spec:
                 cpu: "1"
                 memory: 1Gi
 
-        prometheusOperator:
+        prometheusOperator: #The Prometheus Operator is a Kubernetes controller that manages Prometheus-related resources.
           resources:
             requests:
               cpu: 100m
@@ -60,7 +60,7 @@ spec:
               memory: 256Mi
 
   destination:
-    server: https://kubernetes.default.svc
+    server: https://kubernetes.default.svc #points to the Kubernetes API server of the cluster in which Argo CD is running.
     namespace: monitoring
 
   syncPolicy:
@@ -68,6 +68,6 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=true
-      - ServerSideApply=true
-      - DisableClientSideApplyMigration=true
+      - CreateNamespace=true #Creates the target namespace if needed
+      - ServerSideApply=true #Uses Kubernetes server-side apply for supported resources
+      - DisableClientSideApplyMigration=true #Disables Argo CD's automatic client-side-to-server-side apply migration

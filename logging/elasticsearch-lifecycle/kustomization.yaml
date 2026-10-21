@@ -7,12 +7,14 @@ namespace: logging
 configMapGenerator:
   - name: elasticsearch-lifecycle-config
     files:
-      - ilm-policy.json
-      - index-template.json
-      - apply-lifecycle.sh
+      - ilm-policy.json #Defines the Elasticsearch ILM policy, including configured lifecycle phases and actions
+      - index-template.json #Defines which indices match the template and which ILM policy to attach.
+      - apply-lifecycle.sh #Shell script that calls the Elasticsearch API to install the policy and template and attach the policy to existing indices.
 
 generatorOptions:
-  disableNameSuffixHash: false
+  disableNameSuffixHash: false #This controls whether Kustomize appends a content hash to the generated ConfigMap's name.
 
 resources:
-  - cronjob.yaml
+  - cronjob.yaml  #This tells Kustomize to include the Kubernetes resource defined in cronjob.yaml.
+
+#In your project, that file defines the Elasticsearch lifecycle CronJob, which periodically runs the script to apply or update the ILM configuration.

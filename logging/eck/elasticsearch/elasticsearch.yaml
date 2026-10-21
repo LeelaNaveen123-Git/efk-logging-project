@@ -1,19 +1,19 @@
 ﻿apiVersion: elasticsearch.k8s.elastic.co/v1
 kind: Elasticsearch
 metadata:
-  name: logs
-  namespace: logging
+  name: logs #Names the Elasticsearch custom resource logs
+  namespace: logging #Places the resource in the logging namespace
 spec:
   version: 9.1.0
-  nodeSets:
-    - name: default
-      count: 1
+  nodeSets:  #Defines one or more groups of Elasticsearch nodes
+    - name: default #Names this node group default
+      count: 1 #Requests one Elasticsearch pod in this group
       config:
-        node.store.allow_mmap: false
-      podTemplate:
+        node.store.allow_mmap: false #you disable this memory-mapping behavior for the Elasticsearch node store.
+      podTemplate: #Supplies custom pod configuration.
         spec:
-          containers:
-            - name: elasticsearch
+          containers: #Lists containers inside the pod.
+            - name: elasticsearch #Identifies the Elasticsearch container
               resources:
                 requests:
                   cpu: 500m
@@ -21,12 +21,12 @@ spec:
                 limits:
                   cpu: "1"
                   memory: 2Gi
-      volumeClaimTemplates:
+      volumeClaimTemplates: #instructs ECK to create a PersistentVolumeClaim (PVC) for the Elasticsearch node.
         - metadata:
-            name: elasticsearch-data
+            name: elasticsearch-data #Names the claim template.
           spec:
             accessModes:
-              - ReadWriteOnce
+              - ReadWriteOnce  #ReadWriteOnce (RWO) means the volume can be mounted for read-write use by a single node at a time.
             resources:
               requests:
                 storage: 5Gi
