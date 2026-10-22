@@ -1,73 +1,84 @@
-
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-name: monitoring # name of application 
-  namespace: argocd #means the Application resource itself is stored in the argocd namespace.
+name: monitoring
+namespace: argocd
 
 spec:
-  project: default #refers to the Argo CD AppProject that controls which repositories, destinations, and resource types the application is permitted to use.
+project: default
 
-  source: 
-    repoURL: https://prometheus-community.github.io/helm-charts #Location of the Prometheus Community Helm chart repository
-    chart: kube-prometheus-stack #Name of the chart to install
-    targetRevision: "89.2.0"
-    helm:
-      releaseName: monitoring
-      values: |
-        alertmanager:
-          enabled: false
+source:
+repoURL: [https://prometheus-community.github.io/helm-charts](https://prometheus-community.github.io/helm-charts)
+chart: kube-prometheus-stack
+targetRevision: "89.2.0"
+helm:
+releaseName: monitoring
+values: |
+alertmanager:
+enabled: false
 
-    
-        grafana: #This configures Grafana to obtain its administrator credentials from an existing Kubernetes Secret.
-          admin:
-            existingSecret: monitoring-grafana-admin #Name of the Kubernetes Secret
-            userKey: admin-user  #Key holding the administrator username
-            passwordKey: admin-password #Key holding the administrator password
-          persistence: #This disables persistent storage for Grafana.
-            enabled: false 
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          grafana.ini: #This sets a Grafana configuration option that disables automatic updates for plugins installed through the applicable plugin preinstallation mechanism.
-            plugins:
-              preinstall_auto_update: false
+```
+    grafana:
+      admin:
+        existingSecret: monitoring-grafana-admin
+        userKey: admin-user
+        passwordKey: admin-password
+      persistence:
+        enabled: false
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      grafana.ini:
+        plugins:
+          preinstall_auto_update: false
 
+    prometheus:
+      prometheusSpec:
+        retention: 3d
+        retentionSize: 2GB
 
-        prometheus:
-          prometheusSpec:
-            retention: 3d
-            retentionSize: 2GB 
-            resources:
-              requests:
-                cpu: 200m
-                memory: 512Mi
-              limits:
-                cpu: "1"
-                memory: 1Gi
+        # Persistent storage for Prometheus metrics
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: standard
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 5Gi
 
-        prometheusOperator: #The Prometheus Operator is a Kubernetes controller that manages Prometheus-related resources.
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 300m
-              memory: 256Mi
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
 
-  destination:
-    server: https://kubernetes.default.svc #points to the Kubernetes API server of the cluster in which Argo CD is running.
-    namespace: monitoring
+    prometheusOperator:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+```
 
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true #Creates the target namespace if needed
-      - ServerSideApply=true #Uses Kubernetes server-side apply for supported resources
-      - DisableClientSideApplyMigration=true #Disables Argo CD's automatic client-side-to-server-side apply migration
+destination:
+server: [https://kubernetes.default.svc](https://kubernetes.default.svc)
+namespace: monitoring
+
+syncPolicy:
+automated:
+prune: true
+selfHeal: true
+syncOptions:
+\- CreateNamespace=true
+\- ServerSideApply=true
+\- DisableClientSideApplyMigration=true
