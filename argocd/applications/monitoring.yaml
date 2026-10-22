@@ -1,84 +1,93 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-name: monitoring
-namespace: argocd
-
+  name: monitoring
+  namespace: argocd
 spec:
-project: default
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "89.2.0"
+    helm:
+      releaseName: monitoring
+      values: |
+        alertmanager:
+          enabled: false
+        grafana:
+          admin:
+            existingSecret: monitoring-grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
+          
+          # FIX: Enabled persistence so dashboards and settings survive pod restarts
+          persistence:
+            enabled: true
+            storageClassName: standard
+            accessModes:
+              - ReadWriteOnce
+            size: 5Gi
+          
+          # FIX: Increased resources to stop CPU throttling and out-of-memory health drops
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          
+          # FIX: Loosened probe deadlines to prevent immediate termination loops
+          livenessProbe:
+            initialDelaySeconds: 60
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
 
-source:
-repoURL: [https://prometheus-community.github.io/helm-charts](https://prometheus-community.github.io/helm-charts)
-chart: kube-prometheus-stack
-targetRevision: "89.2.0"
-helm:
-releaseName: monitoring
-values: |
-alertmanager:
-enabled: false
-
-```
-    grafana:
-      admin:
-        existingSecret: monitoring-grafana-admin
-        userKey: admin-user
-        passwordKey: admin-password
-      persistence:
-        enabled: false
-      resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 500m
-          memory: 512Mi
-      grafana.ini:
-        plugins:
-          preinstall_auto_update: false
-
-    prometheus:
-      prometheusSpec:
-        retention: 3d
-        retentionSize: 2GB
-
-        # Persistent storage for Prometheus metrics
-        storageSpec:
-          volumeClaimTemplate:
-            spec:
-              storageClassName: standard
-              accessModes:
-                - ReadWriteOnce
-              resources:
-                requests:
-                  storage: 5Gi
-
-        resources:
-          requests:
-            cpu: 200m
-            memory: 512Mi
-          limits:
-            cpu: "1"
-            memory: 1Gi
-
-    prometheusOperator:
-      resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 300m
-          memory: 256Mi
-```
-
-destination:
-server: [https://kubernetes.default.svc](https://kubernetes.default.svc)
-namespace: monitoring
-
-syncPolicy:
-automated:
-prune: true
-selfHeal: true
-syncOptions:
-\- CreateNamespace=true
-\- ServerSideApply=true
-\- DisableClientSideApplyMigration=true
+          grafana.ini:
+            plugins:
+              preinstall_auto_update: false
+        prometheus:
+          prometheusSpec:
+            retention: 3d
+            retentionSize: 2GB
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: standard
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: 5Gi
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                cpu: "1"
+                memory: 1Gi
+        prometheusOperator:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - DisableClientSideApplyMigration=true
