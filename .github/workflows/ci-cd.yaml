@@ -36,7 +36,7 @@ jobs:
           $pythonExe = "C:\Users\RamisettyLeelanaveen\AppData\Local\Python\pythoncore-3.15-64\python.exe"
 
           if (-not (Test-Path $pythonExe)) {
-            throw "Python not found at $pythonExe. Verify the Python installation path for the runner account."
+            throw "Python not found at $pythonExe. Verify the runner account and Python installation."
           }
 
           & $pythonExe --version
@@ -113,14 +113,66 @@ jobs:
             Write-Host "No root tests directory found; skipping tests."
           }
 
+      - name: Install SonarScanner CLI
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $version = "7.2.0.5079"
+          $zipPath = Join-Path $env:RUNNER_TEMP "sonar-scanner-cli-$version.zip"
+          $extractPath = Join-Path $env:RUNNER_TEMP "sonar-scanner-cli"
+
+          $url = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$version-windows-x64.zip"
+
+          Write-Host "Downloading SonarScanner CLI $version"
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+
+          if (-not (Test-Path $zipPath)) {
+            throw "SonarScanner ZIP download failed."
+          }
+
+          $file = Get-Item $zipPath
+          if ($file.Length -lt 1MB) {
+            throw "Downloaded scanner archive is unexpectedly small; verify the download."
+          }
+
+          if (Test-Path $extractPath) {
+            Remove-Item $extractPath -Recurse -Force
+          }
+
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+
+          $scannerFolder = Get-ChildItem $extractPath -Directory |
+            Select-Object -First 1
+
+          if (-not $scannerFolder) {
+            throw "SonarScanner extraction produced no directory."
+          }
+
+          $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
+
+          if (-not (Test-Path $scanner)) {
+            throw "sonar-scanner.bat was not found."
+          }
+
+          "SONAR_SCANNER_HOME=$($scannerFolder.FullName)" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: SonarQube analysis
-        uses: SonarSource/sonarqube-scan-action@v6
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.qualitygate.wait=true
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $scanner = Join-Path $env:SONAR_SCANNER_HOME "bin\sonar-scanner.bat"
+
+          & $scanner "-Dsonar.qualitygate.wait=true"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "SonarQube analysis failed."
+          }
 
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.34.0
@@ -162,7 +214,8 @@ jobs:
             throw "Docker image build failed."
           }
 
-          "BUILT_IMAGE=$image" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BUILT_IMAGE=$image" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@v0.34.0
