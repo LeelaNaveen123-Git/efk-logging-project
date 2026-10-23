@@ -1,4 +1,3 @@
-
 name: CI-CD - SonarQube, Trivy and Helm
 
 on:
@@ -27,7 +26,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check required tools
-        shell: pwsh
+        shell: powershell
         run: |
           python --version
           docker --version
@@ -35,14 +34,14 @@ jobs:
           git --version
 
       - name: Install Python dependencies
-        shell: pwsh
+        shell: powershell
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r app/requirements.txt
           python -m pip install pytest
 
       - name: Run tests if present
-        shell: pwsh
+        shell: powershell
         run: |
           if (Test-Path tests) {
             python -m pytest tests
@@ -73,7 +72,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Helm lint
-        shell: pwsh
+        shell: powershell
         run: |
           helm lint $env:CHART_PATH
           if ($LASTEXITCODE -ne 0) {
@@ -81,7 +80,7 @@ jobs:
           }
 
       - name: Build Docker image
-        shell: pwsh
+        shell: powershell
         run: |
           docker build -f app/Dockerfile -t "${env:IMAGE_NAME}:${env:GITHUB_SHA}" app
           if ($LASTEXITCODE -ne 0) {
@@ -107,7 +106,7 @@ jobs:
 
       - name: Push scanned image
         if: github.event_name != 'pull_request'
-        shell: pwsh
+        shell: powershell
         run: |
           docker push "${env:IMAGE_NAME}:${env:GITHUB_SHA}"
           if ($LASTEXITCODE -ne 0) {
@@ -125,7 +124,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Verify Kubernetes context
-        shell: pwsh
+        shell: powershell
         run: |
           kubectl config current-context
           kubectl get nodes
@@ -134,7 +133,7 @@ jobs:
           }
 
       - name: Deploy application
-        shell: pwsh
+        shell: powershell
         run: |
           helm upgrade --install sample-app $env:CHART_PATH `
             --namespace default `
@@ -148,7 +147,7 @@ jobs:
           }
 
       - name: Verify deployment
-        shell: pwsh
+        shell: powershell
         run: |
           kubectl rollout status deployment/sample-app `
             --namespace default `
@@ -160,4 +159,3 @@ jobs:
 
           kubectl get pods -n default
           kubectl get service sample-app -n default
-
