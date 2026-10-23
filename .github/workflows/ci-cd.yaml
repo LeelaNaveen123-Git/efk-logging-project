@@ -1,5 +1,4 @@
-
-name: CI-CD - SonarQube, Trivy and Helm
+name: EFK Logging Project CI/CD
 
 on:
   push:
@@ -13,21 +12,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: efk-logging-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CHART_PATH: charts/sample-app
-  K8S_NAMESPACE: default
+  APP_IMAGE_NAME: efk-demo-app
 
 jobs:
   validate-and-scan:
-    name: Code Quality and Security
+    name: Validate, Scan and Build
     runs-on: self-hosted
 
     steps:
-      - name: Checkout repository
+      # 1. Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 2. Verify required tools and Python
       - name: Check required tools
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
@@ -36,26 +41,31 @@ jobs:
           $pythonExe = "C:\Users\RamisettyLeelanaveen\AppData\Local\Python\pythoncore-3.15-64\python.exe"
 
           if (-not (Test-Path $pythonExe)) {
-            throw "Python not found at $pythonExe. Verify the runner account and Python installation."
+            throw "Python executable not found at $pythonExe"
           }
 
           & $pythonExe --version
-          if ($LASTEXITCODE -ne 0) { throw "Python is unavailable." }
-
-          docker --version
-          if ($LASTEXITCODE -ne 0) { throw "Docker is unavailable." }
-
-          helm version
-          if ($LASTEXITCODE -ne 0) { throw "Helm is unavailable." }
-
-          kubectl version --client
-          if ($LASTEXITCODE -ne 0) { throw "kubectl is unavailable." }
-
-          git --version
-          if ($LASTEXITCODE -ne 0) { throw "Git is unavailable." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python verification failed."
+          }
 
           "PYTHON_EXE=$pythonExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          $requiredCommands = @("git", "docker", "helm", "kubectl")
+
+          foreach ($commandName in $requiredCommands) {
+            if (-not (Get-Command $commandName -ErrorAction SilentlyContinue)) {
+              throw "Required command not found: $commandName"
+            }
+
+            Write-Host "$commandName is available."
+          }
+
+          docker --version
+          helm version --short
+          kubectl version --client
+
+      # 3. Validate GitHub Actions secrets
       - name: Validate required secrets
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
@@ -66,19 +76,24 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          foreach ($name in @(
+          $requiredSecrets = @(
             "DOCKERHUB_USERNAME",
             "DOCKERHUB_TOKEN",
             "SONAR_HOST_URL",
             "SONAR_TOKEN"
-          )) {
-            if ([string]::IsNullOrWhiteSpace(
-              [Environment]::GetEnvironmentVariable($name)
-            )) {
-              throw "Missing required GitHub Actions secret: $name"
+          )
+
+          foreach ($secretName in $requiredSecrets) {
+            $value = [Environment]::GetEnvironmentVariable($secretName)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Missing GitHub Actions secret: $secretName"
             }
           }
 
+          Write-Host "All required secrets are configured."
+
+      # 4. Install Python dependencies
       - name: Install Python dependencies
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
@@ -86,33 +101,37 @@ jobs:
 
           & $env:PYTHON_EXE -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to upgrade pip."
+            throw "pip upgrade failed."
           }
 
           & $env:PYTHON_EXE -m pip install -r app/requirements.txt
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install application dependencies."
+            throw "Application dependency installation failed."
           }
 
           & $env:PYTHON_EXE -m pip install pytest
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install pytest."
+            throw "pytest installation failed."
           }
 
-      - name: Run tests if present
+      # 5. Run Python tests if tests exist
+      - name: Run Python tests
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           if (Test-Path "tests") {
-            & $env:PYTHON_EXE -m pytest tests
+            & $env:PYTHON_EXE -m pytest tests -v
+
             if ($LASTEXITCODE -ne 0) {
               throw "Python tests failed."
             }
-          } else {
-            Write-Host "No root tests directory found; skipping tests."
+          }
+          else {
+            Write-Host "No root tests directory found. Skipping pytest."
           }
 
+      # 6. Download SonarScanner for Windows
       - name: Install SonarScanner CLI
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
@@ -124,16 +143,16 @@ jobs:
 
           $url = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$version-windows-x64.zip"
 
-          Write-Host "Downloading SonarScanner CLI $version"
           Invoke-WebRequest -Uri $url -OutFile $zipPath
 
           if (-not (Test-Path $zipPath)) {
-            throw "SonarScanner ZIP download failed."
+            throw "SonarScanner archive was not downloaded."
           }
 
-          $file = Get-Item $zipPath
-          if ($file.Length -lt 1MB) {
-            throw "Downloaded scanner archive is unexpectedly small; verify the download."
+          $archive = Get-Item $zipPath
+
+          if ($archive.Length -lt 1MB) {
+            throw "SonarScanner archive is unexpectedly small. Check the download."
           }
 
           if (Test-Path $extractPath) {
@@ -146,18 +165,21 @@ jobs:
             Select-Object -First 1
 
           if (-not $scannerFolder) {
-            throw "SonarScanner extraction produced no directory."
+            throw "SonarScanner installation folder was not found."
           }
 
           $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
 
           if (-not (Test-Path $scanner)) {
-            throw "sonar-scanner.bat was not found."
+            throw "SonarScanner executable not found: $scanner"
           }
 
           "SONAR_SCANNER_HOME=$($scannerFolder.FullName)" |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          Write-Host "SonarScanner installed successfully."
+
+      # 7. Run SonarQube analysis and wait for quality gate
       - name: SonarQube analysis
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
@@ -168,48 +190,106 @@ jobs:
 
           $scanner = Join-Path $env:SONAR_SCANNER_HOME "bin\sonar-scanner.bat"
 
-          & $scanner "-Dsonar.qualitygate.wait=true"
+          & $scanner `
+            "-Dsonar.projectKey=efk-logging-project" `
+            "-Dsonar.projectName=EFK Logging Project" `
+            "-Dsonar.sources=app" `
+            "-Dsonar.host.url=$env:SONAR_HOST_URL" `
+            "-Dsonar.token=$env:SONAR_TOKEN" `
+            "-Dsonar.qualitygate.wait=true"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "SonarQube analysis failed."
+            throw "SonarQube analysis or quality gate failed."
           }
 
-      - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.34.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig,secret
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
+      # 8. Download Trivy Windows executable without Bash actions
+      - name: Install Trivy
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $ErrorActionPreference = "Stop"
 
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest" `
+            -Headers @{ "User-Agent" = "efk-logging-ci" }
+
+          $asset = $release.assets |
+            Where-Object { $_.name -match "_Windows-64bit\.zip$" } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            throw "Could not find the Trivy Windows 64-bit release archive."
+          }
+
+          $zipPath = Join-Path $env:RUNNER_TEMP "trivy-windows.zip"
+          $extractPath = Join-Path $env:RUNNER_TEMP "trivy-windows"
+
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+
+          if (Test-Path $extractPath) {
+            Remove-Item $extractPath -Recurse -Force
+          }
+
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+
+          $trivyExe = Join-Path $extractPath "trivy.exe"
+
+          if (-not (Test-Path $trivyExe)) {
+            throw "trivy.exe was not found after extraction."
+          }
+
+          "$extractPath" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          & $trivyExe --version
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Trivy executable verification failed."
+          }
+
+      # 9. Scan repository files, dependencies and configuration
+      - name: Trivy filesystem security scan
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          trivy fs `
+            --scanners vuln,misconfig,secret `
+            --severity HIGH,CRITICAL `
+            --ignore-unfixed `
+            --exit-code 1 `
+            .
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Trivy filesystem scan failed or found HIGH/CRITICAL issues."
+          }
+
+      # 10. Validate Helm chart
       - name: Helm lint
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           helm lint $env:CHART_PATH
+
           if ($LASTEXITCODE -ne 0) {
-            throw "Helm lint failed."
+            throw "Helm chart validation failed."
           }
 
+      # 11. Build Docker image
       - name: Build Docker image
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            $image = "efk-demo-app:pr-$($env:GITHUB_SHA)"
-          } else {
-            $image = "$($env:DOCKERHUB_USERNAME)/efk-demo-app:$($env:GITHUB_SHA)"
-          }
+          $image = "$env:DOCKERHUB_USERNAME/$env:APP_IMAGE_NAME`:$env:IMAGE_TAG"
 
-          Write-Host "Building image: $image"
+          docker build `
+            -f app/Dockerfile `
+            -t $image `
+            app
 
-          docker build -f app/Dockerfile -t $image app
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image build failed."
           }
@@ -217,78 +297,104 @@ jobs:
           "BUILT_IMAGE=$image" |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@v0.34.0
-        with:
-          scan-type: image
-          image-ref: ${{ env.BUILT_IMAGE }}
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
+      # 12. Scan the built image before publishing
+      - name: Trivy Docker image security scan
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      - name: Log in to Docker Hub
+          trivy image `
+            --scanners vuln,misconfig,secret `
+            --severity HIGH,CRITICAL `
+            --ignore-unfixed `
+            --exit-code 1 `
+            $env:BUILT_IMAGE
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Trivy image scan failed or found HIGH/CRITICAL issues."
+          }
+
+      # 13. Publish image to Docker Hub
+      - name: Login to Docker Hub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      - name: Push scanned image
+          $env:DOCKERHUB_TOKEN |
+            docker login --username $env:DOCKERHUB_USERNAME --password-stdin
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker Hub login failed."
+          }
+
+      - name: Push Docker image
         if: github.event_name != 'pull_request'
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           docker push $env:BUILT_IMAGE
+
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image push failed."
           }
 
+      # 14. Remove Docker credentials after publishing
+      - name: Logout from Docker Hub
+        if: always() && github.event_name != 'pull_request'
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          docker logout
+          exit 0
+
   deploy:
-    name: Deploy application with Helm
+    name: Deploy to Docker Desktop Kubernetes
     needs: validate-and-scan
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: self-hosted
 
     steps:
-      - name: Checkout repository
+      # 15. Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Verify Kubernetes context
+      # 16. Verify Kubernetes context
+      - name: Verify Docker Desktop Kubernetes
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           $context = kubectl config current-context
-          if ($LASTEXITCODE -ne 0) {
-            throw "Cannot read the Kubernetes context."
-          }
 
-          Write-Host "Kubernetes context: $context"
+          Write-Host "Current Kubernetes context: $context"
 
           if ($context -ne "docker-desktop") {
             throw "Expected Docker Desktop context, but found: $context"
           }
 
           kubectl get nodes
+
           if ($LASTEXITCODE -ne 0) {
-            throw "Cannot access the Kubernetes cluster."
+            throw "Could not access Kubernetes nodes."
           }
 
-      - name: Deploy application with Helm
+      # 17. Deploy using Helm
+      - name: Deploy sample app using Helm
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $image = "$($env:DOCKERHUB_USERNAME)/efk-demo-app"
-
           helm upgrade --install sample-app $env:CHART_PATH `
-            --namespace $env:K8S_NAMESPACE `
-            --set-string image.repository="$image" `
-            --set-string image.tag="$env:GITHUB_SHA" `
+            --namespace default `
+            --set-string "image.repository=$env:DOCKERHUB_USERNAME/efk-demo-app" `
+            --set-string "image.tag=$env:IMAGE_TAG" `
             --wait `
             --timeout 5m
 
@@ -296,19 +402,20 @@ jobs:
             throw "Helm deployment failed."
           }
 
+      # 18. Verify deployment rollout
       - name: Verify deployment
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           kubectl rollout status deployment/sample-app `
-            --namespace $env:K8S_NAMESPACE `
+            --namespace default `
             --timeout=180s
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Sample application rollout failed."
+            throw "Sample app rollout failed."
           }
 
-          kubectl get deployment sample-app -n $env:K8S_NAMESPACE
-          kubectl get pods -n $env:K8S_NAMESPACE
-          kubectl get service sample-app -n $env:K8S_NAMESPACE
+          kubectl get deployment sample-app -n default
+          kubectl get pods -n default -l app.kubernetes.io/instance=sample-app
+          kubectl get service sample-app -n default
