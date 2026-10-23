@@ -14,7 +14,6 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/efk-demo-app
   CHART_PATH: charts/sample-app
   K8S_NAMESPACE: default
 
@@ -29,17 +28,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Check required tools
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
-          python --version
+          $pythonExe = "C:\Users\RamisettyLeelanaveen\AppData\Local\Python\pythoncore-3.15-64\python.exe"
+
+          if (-not (Test-Path $pythonExe)) {
+            throw "Python not found at $pythonExe. Verify the Python installation path for the runner account."
+          }
+
+          & $pythonExe --version
           if ($LASTEXITCODE -ne 0) { throw "Python is unavailable." }
 
           docker --version
@@ -53,6 +53,8 @@ jobs:
 
           git --version
           if ($LASTEXITCODE -ne 0) { throw "Git is unavailable." }
+
+          "PYTHON_EXE=$pythonExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Validate required secrets
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
@@ -82,17 +84,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          python -m pip install --upgrade pip
+          & $env:PYTHON_EXE -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to upgrade pip."
           }
 
-          python -m pip install -r app/requirements.txt
+          & $env:PYTHON_EXE -m pip install -r app/requirements.txt
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to install application dependencies."
           }
 
-          python -m pip install pytest
+          & $env:PYTHON_EXE -m pip install pytest
           if ($LASTEXITCODE -ne 0) {
             throw "Failed to install pytest."
           }
@@ -103,7 +105,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           if (Test-Path "tests") {
-            python -m pytest tests
+            & $env:PYTHON_EXE -m pytest tests
             if ($LASTEXITCODE -ne 0) {
               throw "Python tests failed."
             }
@@ -229,12 +231,11 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $image = "$($env:DOCKERHUB_USERNAME)/efk-demo-app"
-          $tag = $env:GITHUB_SHA
 
           helm upgrade --install sample-app $env:CHART_PATH `
             --namespace $env:K8S_NAMESPACE `
             --set-string image.repository="$image" `
-            --set-string image.tag="$tag" `
+            --set-string image.tag="$env:GITHUB_SHA" `
             --wait `
             --timeout 5m
 
