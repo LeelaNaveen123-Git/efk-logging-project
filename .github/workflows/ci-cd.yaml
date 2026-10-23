@@ -26,25 +26,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check Python
-        run: python --version
+      - name: Check required tools
         shell: pwsh
+        run: |
+          python --version
+          docker --version
+          helm version
+          git --version
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
-          pip install pytest
-        shell: pwsh
+          python -m pip install -r app/requirements.txt
+          python -m pip install pytest
 
       - name: Run tests if present
+        shell: pwsh
         run: |
           if (Test-Path tests) {
             python -m pytest tests
+            if ($LASTEXITCODE -ne 0) {
+              throw "Python tests failed."
+            }
           } else {
             Write-Host "No root tests directory found; skipping tests."
           }
-        shell: pwsh
 
       - name: SonarQube analysis
         uses: SonarSource/sonarqube-scan-action@v6
@@ -56,7 +63,7 @@ jobs:
             -Dsonar.qualitygate.wait=true
 
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.34.0
         with:
           scan-type: fs
           scan-ref: .
@@ -66,16 +73,23 @@ jobs:
           ignore-unfixed: true
 
       - name: Helm lint
-        run: helm lint $env:CHART_PATH
         shell: pwsh
+        run: |
+          helm lint $env:CHART_PATH
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm lint failed."
+          }
 
       - name: Build Docker image
+        shell: pwsh
         run: |
           docker build -f app/Dockerfile -t "${env:IMAGE_NAME}:${env:GITHUB_SHA}" app
-        shell: pwsh
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker image build failed."
+          }
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.34.0
         with:
           scan-type: image
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/efk-demo-app:${{ github.sha }}
@@ -93,9 +107,12 @@ jobs:
 
       - name: Push scanned image
         if: github.event_name != 'pull_request'
+        shell: pwsh
         run: |
           docker push "${env:IMAGE_NAME}:${env:GITHUB_SHA}"
-        shell: pwsh
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker image push failed."
+          }
 
   deploy:
     name: Deploy application with Helm
@@ -107,7 +124,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify Kubernetes context
+        shell: pwsh
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cannot access the Kubernetes cluster."
+          }
+
       - name: Deploy application
+        shell: pwsh
         run: |
           helm upgrade --install sample-app $env:CHART_PATH `
             --namespace default `
@@ -115,12 +142,22 @@ jobs:
             --set-string image.tag=$env:GITHUB_SHA `
             --wait `
             --timeout 5m
-        shell: pwsh
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm deployment failed."
+          }
 
       - name: Verify deployment
+        shell: pwsh
         run: |
           kubectl rollout status deployment/sample-app `
             --namespace default `
             --timeout=180s
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Sample application rollout failed."
+          }
+
           kubectl get pods -n default
-        shell: pwsh
+          kubectl get service sample-app -n default
+
