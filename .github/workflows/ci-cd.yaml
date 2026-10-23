@@ -16,6 +16,7 @@ permissions:
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/efk-demo-app
   CHART_PATH: charts/sample-app
+  K8S_NAMESPACE: default
 
 jobs:
   validate-and-scan:
@@ -28,42 +29,52 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Check required tools
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           python --version
-          if ($LASTEXITCODE -ne 0) { throw "Python is not available." }
+          if ($LASTEXITCODE -ne 0) { throw "Python is unavailable." }
 
           docker --version
-          if ($LASTEXITCODE -ne 0) { throw "Docker is not available." }
+          if ($LASTEXITCODE -ne 0) { throw "Docker is unavailable." }
 
           helm version
-          if ($LASTEXITCODE -ne 0) { throw "Helm is not available." }
+          if ($LASTEXITCODE -ne 0) { throw "Helm is unavailable." }
+
+          kubectl version --client
+          if ($LASTEXITCODE -ne 0) { throw "kubectl is unavailable." }
 
           git --version
-          if ($LASTEXITCODE -ne 0) { throw "Git is not available." }
+          if ($LASTEXITCODE -ne 0) { throw "Git is unavailable." }
 
       - name: Validate required secrets
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.DOCKERHUB_USERNAME }}")) {
-            throw "Missing GitHub secret: DOCKERHUB_USERNAME"
-          }
-
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.DOCKERHUB_TOKEN }}")) {
-            throw "Missing GitHub secret: DOCKERHUB_TOKEN"
-          }
-
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.SONAR_HOST_URL }}")) {
-            throw "Missing GitHub secret: SONAR_HOST_URL"
-          }
-
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.SONAR_TOKEN }}")) {
-            throw "Missing GitHub secret: SONAR_TOKEN"
+          foreach ($name in @(
+            "DOCKERHUB_USERNAME",
+            "DOCKERHUB_TOKEN",
+            "SONAR_HOST_URL",
+            "SONAR_TOKEN"
+          )) {
+            if ([string]::IsNullOrWhiteSpace(
+              [Environment]::GetEnvironmentVariable($name)
+            )) {
+              throw "Missing required GitHub Actions secret: $name"
+            }
           }
 
       - name: Install Python dependencies
@@ -72,13 +83,19 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           python -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upgrade pip."
+          }
 
           python -m pip install -r app/requirements.txt
-          if ($LASTEXITCODE -ne 0) { throw "Failed to install application dependencies." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install application dependencies."
+          }
 
           python -m pip install pytest
-          if ($LASTEXITCODE -ne 0) { throw "Failed to install pytest." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install pytest."
+          }
 
       - name: Run tests if present
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
@@ -110,7 +127,7 @@ jobs:
           scan-ref: .
           scanners: vuln,misconfig,secret
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: "1"
           ignore-unfixed: true
 
       - name: Helm lint
@@ -125,10 +142,17 @@ jobs:
 
       - name: Build Docker image
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $image = "$($env:IMAGE_NAME):$($env:GITHUB_SHA)"
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $image = "efk-demo-app:pr-$($env:GITHUB_SHA)"
+          } else {
+            $image = "$($env:DOCKERHUB_USERNAME)/efk-demo-app:$($env:GITHUB_SHA)"
+          }
+
           Write-Host "Building image: $image"
 
           docker build -f app/Dockerfile -t $image app
@@ -136,14 +160,16 @@ jobs:
             throw "Docker image build failed."
           }
 
+          "BUILT_IMAGE=$image" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@v0.34.0
         with:
           scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/efk-demo-app:${{ github.sha }}
+          image-ref: ${{ env.BUILT_IMAGE }}
           scanners: vuln
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: "1"
           ignore-unfixed: true
 
       - name: Log in to Docker Hub
@@ -159,8 +185,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $image = "$($env:IMAGE_NAME):$($env:GITHUB_SHA)"
-          docker push $image
+          docker push $env:BUILT_IMAGE
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image push failed."
           }
@@ -180,9 +205,15 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          kubectl config current-context
+          $context = kubectl config current-context
           if ($LASTEXITCODE -ne 0) {
             throw "Cannot read the Kubernetes context."
+          }
+
+          Write-Host "Kubernetes context: $context"
+
+          if ($context -ne "docker-desktop") {
+            throw "Expected Docker Desktop context, but found: $context"
           }
 
           kubectl get nodes
@@ -192,13 +223,18 @@ jobs:
 
       - name: Deploy application with Helm
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           $ErrorActionPreference = "Stop"
 
+          $image = "$($env:DOCKERHUB_USERNAME)/efk-demo-app"
+          $tag = $env:GITHUB_SHA
+
           helm upgrade --install sample-app $env:CHART_PATH `
-            --namespace default `
-            --set image.repository="$env:IMAGE_NAME" `
-            --set-string image.tag="$env:GITHUB_SHA" `
+            --namespace $env:K8S_NAMESPACE `
+            --set-string image.repository="$image" `
+            --set-string image.tag="$tag" `
             --wait `
             --timeout 5m
 
@@ -212,12 +248,13 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           kubectl rollout status deployment/sample-app `
-            --namespace default `
+            --namespace $env:K8S_NAMESPACE `
             --timeout=180s
 
           if ($LASTEXITCODE -ne 0) {
             throw "Sample application rollout failed."
           }
 
-          kubectl get pods -n default
-          kubectl get service sample-app -n default
+          kubectl get deployment sample-app -n $env:K8S_NAMESPACE
+          kubectl get pods -n $env:K8S_NAMESPACE
+          kubectl get service sample-app -n $env:K8S_NAMESPACE
