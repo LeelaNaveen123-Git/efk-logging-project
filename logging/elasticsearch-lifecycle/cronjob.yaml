@@ -1,4 +1,3 @@
-
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -7,39 +6,59 @@ metadata:
 spec:
   schedule: "*/15 * * * *"
   concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 1
+  successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 3
+      backoffLimit: 2
       template:
+        metadata:
+          labels:
+            app: elasticsearch-lifecycle
         spec:
           restartPolicy: OnFailure
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: apply-lifecycle
               image: curlimages/curl:8.12.1
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
               command:
                 - /bin/sh
                 - /config/apply-lifecycle.sh
               env:
+                - name: ES_URL
+                  value: "https://logs-es-http.logging.svc:9200"
+                - name: ES_USERNAME
+                  value: "elastic"
                 - name: ES_PASSWORD
                   valueFrom:
                     secretKeyRef:
                       name: logs-es-elastic-user
                       key: elastic
               volumeMounts:
-                - name: config
+                - name: lifecycle-config
                   mountPath: /config
                   readOnly: true
-                - name: certificates
+                - name: es-certs
                   mountPath: /certs
                   readOnly: true
           volumes:
-            - name: config
+            - name: lifecycle-config
               configMap:
-                name: elasticsearch-lifecycle-config
+                name: elasticsearch-lifecycle
                 defaultMode: 0444
-            - name: certificates
+            - name: es-certs
               secret:
                 secretName: logs-es-http-certs-public
                 items:
