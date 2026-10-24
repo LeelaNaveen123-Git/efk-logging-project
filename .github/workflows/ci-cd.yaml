@@ -1,4 +1,3 @@
-
 name: EFK Logging Project CI/CD
 
 on:
@@ -27,7 +26,7 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      # 1. Checkout repository
+      # 1. Checkout source code
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
@@ -78,7 +77,7 @@ jobs:
             throw "kubectl is unavailable."
           }
 
-      # 3. Validate GitHub secrets
+      # 3. Validate required GitHub secrets
       - name: Validate required secrets
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
@@ -104,7 +103,7 @@ jobs:
           $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
 
           if ($username -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*$') {
-            throw "Invalid Docker Hub username. Set DOCKERHUB_USERNAME to your Docker Hub username only."
+            throw "Invalid Docker Hub username."
           }
 
           try {
@@ -121,34 +120,27 @@ jobs:
             throw "SONAR_HOST_URL must be an absolute HTTP or HTTPS URL."
           }
 
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText(
             $env:GITHUB_ENV,
             "DOCKERHUB_USERNAME_NORMALIZED=$username" + [Environment]::NewLine,
             $utf8NoBom
           )
 
-          Write-Host "Required secrets and Docker Hub username format validated."
+          Write-Host "Required secrets validated."
 
-      # 4. Install Python dependencies
+      # 4. Install Python dependencies using pip cache
       - name: Install Python dependencies
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
-          & $env:PYTHON_EXE -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) {
-            throw "pip upgrade failed."
-          }
+          & $env:PYTHON_EXE -m pip install `
+            --disable-pip-version-check `
+            --cache-dir "$env:USERPROFILE\.cache\pip" `
+            -r app/requirements.txt pytest
 
-          & $env:PYTHON_EXE -m pip install -r app/requirements.txt
           if ($LASTEXITCODE -ne 0) {
-            throw "Dependency installation failed."
-          }
-
-          & $env:PYTHON_EXE -m pip install pytest
-          if ($LASTEXITCODE -ne 0) {
-            throw "pytest installation failed."
+            throw "Python dependency installation failed."
           }
 
       # 5. Run Python tests
@@ -159,6 +151,7 @@ jobs:
 
           if (Test-Path "tests") {
             & $env:PYTHON_EXE -m pytest tests -v
+
             if ($LASTEXITCODE -ne 0) {
               throw "Python tests failed."
             }
@@ -167,47 +160,69 @@ jobs:
             Write-Host "No root tests directory found; skipping pytest."
           }
 
-      # 6. Install SonarScanner CLI
-      - name: Install SonarScanner CLI
+      # 6. Install or reuse SonarScanner
+      - name: Install or reuse SonarScanner CLI
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
 
           $version = "7.2.0.5079"
-          $zipPath = Join-Path $env:RUNNER_TEMP "sonar-scanner-cli-$version.zip"
-          $extractPath = Join-Path $env:RUNNER_TEMP "sonar-scanner-cli"
-          $url = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$version-windows-x64.zip"
+          $toolsRoot = Join-Path $env:USERPROFILE ".tools"
+          $extractPath = Join-Path $toolsRoot "sonar-scanner-cli-$version"
 
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          $scannerFolder = Get-ChildItem $extractPath -Directory -ErrorAction SilentlyContinue |
+            Select-Object -First 1
 
-          if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1MB) {
-            throw "SonarScanner archive is missing or invalid."
+          $scanner = $null
+
+          if ($scannerFolder) {
+            $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
           }
 
-          if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force
+          if (-not $scanner -or -not (Test-Path $scanner)) {
+            New-Item -ItemType Directory -Path $toolsRoot -Force | Out-Null
+
+            $zipPath = Join-Path $env:RUNNER_TEMP "sonar-scanner-cli-$version.zip"
+            $url = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$version-windows-x64.zip"
+
+            Invoke-WebRequest -Uri $url -OutFile $zipPath
+
+            if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1MB) {
+              throw "SonarScanner archive is missing or invalid."
+            }
+
+            if (Test-Path $extractPath) {
+              Remove-Item $extractPath -Recurse -Force
+            }
+
+            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+
+            $scannerFolder = Get-ChildItem $extractPath -Directory |
+              Select-Object -First 1
+
+            if (-not $scannerFolder) {
+              throw "SonarScanner folder not found."
+            }
+
+            $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
           }
 
-          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-
-          $scannerFolder = Get-ChildItem $extractPath -Directory | Select-Object -First 1
-          if (-not $scannerFolder) {
-            throw "SonarScanner folder not found."
-          }
-
-          $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
           if (-not (Test-Path $scanner)) {
             throw "SonarScanner executable not found."
           }
 
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $scannerHome = Split-Path (Split-Path $scanner -Parent) -Parent
+
           [System.IO.File]::AppendAllText(
             $env:GITHUB_ENV,
-            "SONAR_SCANNER_HOME=$($scannerFolder.FullName)" + [Environment]::NewLine,
+            "SONAR_SCANNER_HOME=$scannerHome" + [Environment]::NewLine,
             $utf8NoBom
           )
 
-      # 7. SonarQube analysis
+          Write-Host "SonarScanner is ready."
+
+      # 7. Run SonarQube analysis
       - name: SonarQube analysis
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         env:
@@ -230,8 +245,8 @@ jobs:
             throw "SonarQube analysis or quality gate failed."
           }
 
-      # 8. Install Trivy
-      - name: Install Trivy
+      # 8. Install or reuse Trivy
+      - name: Install or reuse Trivy
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
           $ErrorActionPreference = "Stop"
@@ -240,38 +255,60 @@ jobs:
             -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest" `
             -Headers @{ "User-Agent" = "efk-logging-ci" }
 
-          $asset = $release.assets |
-            Where-Object { $_.name -match '_Windows-64bit\.zip$' } |
-            Select-Object -First 1
+          $version = $release.tag_name.TrimStart("v")
+          $toolsRoot = Join-Path $env:USERPROFILE ".tools"
+          $trivyDir = Join-Path $toolsRoot "trivy-$version"
+          $trivyExe = Join-Path $trivyDir "trivy.exe"
 
-          if (-not $asset) {
-            throw "Trivy Windows archive not found in the latest release."
-          }
-
-          $zipPath = Join-Path $env:RUNNER_TEMP "trivy-windows.zip"
-          $extractPath = Join-Path $env:RUNNER_TEMP "trivy-windows"
-
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-
-          if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force
-          }
-
-          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-
-          $trivyExe = Join-Path $extractPath "trivy.exe"
           if (-not (Test-Path $trivyExe)) {
-            throw "trivy.exe was not found."
+            New-Item -ItemType Directory -Path $toolsRoot -Force | Out-Null
+
+            $asset = $release.assets |
+              Where-Object { $_.name -match '_Windows-64bit\.zip$' } |
+              Select-Object -First 1
+
+            if (-not $asset) {
+              throw "Trivy Windows archive not found."
+            }
+
+            $zipPath = Join-Path $env:RUNNER_TEMP "trivy-windows.zip"
+            $tempExtract = Join-Path $env:RUNNER_TEMP "trivy-windows"
+
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+
+            if (Test-Path $tempExtract) {
+              Remove-Item $tempExtract -Recurse -Force
+            }
+
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $tempExtract -Force
+
+            $downloadedExe = Join-Path $tempExtract "trivy.exe"
+
+            if (-not (Test-Path $downloadedExe)) {
+              throw "trivy.exe was not found in the archive."
+            }
+
+            New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+            Copy-Item $downloadedExe -Destination $trivyExe -Force
           }
 
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $trivyCache = Join-Path $env:USERPROFILE ".cache\trivy"
+          New-Item -ItemType Directory -Path $trivyCache -Force | Out-Null
+
           [System.IO.File]::AppendAllText(
-            $env:GITHUB_PATH,
-            $extractPath + [Environment]::NewLine,
+            $env:GITHUB_ENV,
+            "TRIVY_EXE=$trivyExe" + [Environment]::NewLine,
+            $utf8NoBom
+          )
+
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_ENV,
+            "TRIVY_CACHE_DIR=$trivyCache" + [Environment]::NewLine,
             $utf8NoBom
           )
 
           & $trivyExe --version
+
           if ($LASTEXITCODE -ne 0) {
             throw "Trivy verification failed."
           }
@@ -282,7 +319,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          trivy fs `
+          & $env:TRIVY_EXE fs `
+            --cache-dir "$env:TRIVY_CACHE_DIR" `
             --scanners vuln,misconfig,secret `
             --severity HIGH,CRITICAL `
             --ignore-unfixed `
@@ -300,11 +338,13 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           helm lint $env:CHART_PATH --strict
+
           if ($LASTEXITCODE -ne 0) {
             throw "Helm lint failed."
           }
 
           helm template sample-app $env:CHART_PATH --namespace default | Out-Null
+
           if ($LASTEXITCODE -ne 0) {
             throw "Helm template rendering failed."
           }
@@ -326,7 +366,7 @@ jobs:
           }
 
           if ($username -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*$') {
-            throw "Invalid normalized Docker Hub username."
+            throw "Invalid Docker Hub username."
           }
 
           if ($repository -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*$') {
@@ -339,16 +379,19 @@ jobs:
 
           $image = "${username}/${repository}:${tag}"
 
-          Write-Host "Building Docker image."
-          Write-Host "Repository: $repository"
-          Write-Host "Tag: $tag"
+          Write-Host "Building Docker image: $image"
 
-          docker build --pull -f app/Dockerfile -t $image app
+          # Keep Docker's layer cache on the self-hosted runner.
+          # Pull base-image updates separately and periodically.
+          docker build `
+            -f app/Dockerfile `
+            -t $image `
+            app
+
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image build failed."
           }
 
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText(
             $env:GITHUB_ENV,
             "BUILT_IMAGE=$image" + [Environment]::NewLine,
@@ -365,7 +408,8 @@ jobs:
             throw "BUILT_IMAGE is empty. Check the Docker build step."
           }
 
-          trivy image `
+          & $env:TRIVY_EXE image `
+            --cache-dir "$env:TRIVY_CACHE_DIR" `
             --scanners vuln,misconfig,secret `
             --severity HIGH,CRITICAL `
             --ignore-unfixed `
@@ -396,6 +440,7 @@ jobs:
           }
 
           docker push $env:BUILT_IMAGE
+
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image push failed."
           }
