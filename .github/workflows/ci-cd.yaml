@@ -64,13 +64,19 @@ jobs:
           }
 
           docker --version
-          if ($LASTEXITCODE -ne 0) { throw "Docker is unavailable." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker is unavailable."
+          }
 
           helm version --short
-          if ($LASTEXITCODE -ne 0) { throw "Helm is unavailable." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm is unavailable."
+          }
 
           kubectl version --client
-          if ($LASTEXITCODE -ne 0) { throw "kubectl is unavailable." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "kubectl is unavailable."
+          }
 
       # 3. Validate GitHub secrets
       - name: Validate required secrets
@@ -131,15 +137,21 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           & $env:PYTHON_EXE -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "pip upgrade failed."
+          }
 
           & $env:PYTHON_EXE -m pip install -r app/requirements.txt
-          if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dependency installation failed."
+          }
 
           & $env:PYTHON_EXE -m pip install pytest
-          if ($LASTEXITCODE -ne 0) { throw "pytest installation failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "pytest installation failed."
+          }
 
-      # 5. Run tests
+      # 5. Run Python tests
       - name: Run Python tests
         shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
         run: |
@@ -147,7 +159,9 @@ jobs:
 
           if (Test-Path "tests") {
             & $env:PYTHON_EXE -m pytest tests -v
-            if ($LASTEXITCODE -ne 0) { throw "Python tests failed." }
+            if ($LASTEXITCODE -ne 0) {
+              throw "Python tests failed."
+            }
           }
           else {
             Write-Host "No root tests directory found; skipping pytest."
@@ -177,10 +191,14 @@ jobs:
           Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
           $scannerFolder = Get-ChildItem $extractPath -Directory | Select-Object -First 1
-          if (-not $scannerFolder) { throw "SonarScanner folder not found." }
+          if (-not $scannerFolder) {
+            throw "SonarScanner folder not found."
+          }
 
           $scanner = Join-Path $scannerFolder.FullName "bin\sonar-scanner.bat"
-          if (-not (Test-Path $scanner)) { throw "SonarScanner executable not found." }
+          if (-not (Test-Path $scanner)) {
+            throw "SonarScanner executable not found."
+          }
 
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText(
@@ -254,7 +272,9 @@ jobs:
           )
 
           & $trivyExe --version
-          if ($LASTEXITCODE -ne 0) { throw "Trivy verification failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Trivy verification failed."
+          }
 
       # 9. Scan repository
       - name: Trivy filesystem security scan
@@ -280,10 +300,14 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           helm lint $env:CHART_PATH --strict
-          if ($LASTEXITCODE -ne 0) { throw "Helm lint failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm lint failed."
+          }
 
           helm template sample-app $env:CHART_PATH --namespace default | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Helm template rendering failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm template rendering failed."
+          }
 
       # 11. Build Docker image
       - name: Build Docker image
@@ -320,7 +344,9 @@ jobs:
           Write-Host "Tag: $tag"
 
           docker build --pull -f app/Dockerfile -t $image app
-          if ($LASTEXITCODE -ne 0) { throw "Docker image build failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker image build failed."
+          }
 
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText(
@@ -370,7 +396,9 @@ jobs:
           }
 
           docker push $env:BUILT_IMAGE
-          if ($LASTEXITCODE -ne 0) { throw "Docker image push failed." }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker image push failed."
+          }
 
       # 15. Logout from Docker Hub
       - name: Logout from Docker Hub
@@ -379,76 +407,3 @@ jobs:
         run: |
           docker logout
           exit 0
-
-  deploy:
-    name: Deploy to Docker Desktop Kubernetes
-    needs: validate-and-scan
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: self-hosted
-
-    steps:
-      # 16. Checkout repository
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      # 17. Verify Kubernetes context
-      - name: Verify Docker Desktop Kubernetes
-        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $context = kubectl config current-context
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to read the current Kubernetes context."
-          }
-
-          Write-Host "Current Kubernetes context: $context"
-
-          if ($context -ne "docker-desktop") {
-            throw "Expected docker-desktop context, found: $context"
-          }
-
-          kubectl get nodes
-          if ($LASTEXITCODE -ne 0) {
-            throw "Cannot access Kubernetes nodes."
-          }
-
-      # 18. Deploy with Helm
-      - name: Deploy sample app using Helm
-        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-
-          if ($username -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*$') {
-            throw "Invalid Docker Hub username."
-          }
-
-          $imageRepository = "${username}/efk-demo-app"
-
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Helm deployment failed."
-          }
-
-      # 19. Verify deployment
-      - name: Verify deployment
-        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          kubectl rollout status deployment/sample-app `
-            --namespace default `
-            --timeout=180s
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Sample app rollout failed."
-          }
-
-          kubectl get deployment sample-app -n default
-          kubectl get pods -n default -l app.kubernetes.io/instance=sample-app
-          kubectl get service sample-app -n default
