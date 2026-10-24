@@ -430,12 +430,6 @@ jobs:
 
           $imageRepository = "${username}/efk-demo-app"
 
-          helm upgrade --install sample-app $env:CHART_PATH `
-            --namespace default `
-            --set-string "image.repository=$imageRepository" `
-            --set-string "image.tag=$env:IMAGE_TAG" `
-            --wait `
-            --timeout 5m
 
           if ($LASTEXITCODE -ne 0) {
             throw "Helm deployment failed."
