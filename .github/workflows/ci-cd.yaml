@@ -3,9 +3,11 @@ name: EFK Logging Project CI/CD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -24,7 +26,6 @@ jobs:
     env:
       IMAGE_NAME: efk-demo-app
       CHART_PATH: charts/sample-app
-      TRIVY_VERSION: "0.58.2"
 
     steps:
       # 1. Checkout
@@ -33,7 +34,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. Python setup and pip cache
+      # 2. Python and dependency cache
       - name: Set up Python
         id: python
         uses: actions/setup-python@v5
@@ -43,7 +44,7 @@ jobs:
           cache-dependency-path: app/requirements.txt
         continue-on-error: true
 
-      # 3. Validate tools and secrets
+      # 3. Validate runner and GitHub secrets
       - name: Validate tools and secrets
         id: validate
         shell: powershell
@@ -58,26 +59,28 @@ jobs:
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
               throw "Required tool not found: $tool"
             }
-
-            Write-Host "$tool is available."
+            Write-Host "$tool is installed."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME)) {
-            throw "Missing GitHub secret: DOCKERHUB_USERNAME"
+            throw "Missing secret DOCKERHUB_USERNAME."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_TOKEN)) {
-            throw "Missing GitHub secret: DOCKERHUB_TOKEN"
+            throw "Missing secret DOCKERHUB_TOKEN."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
-            throw "Missing GitHub secret: SONAR_TOKEN"
+            throw "Missing secret SONAR_TOKEN."
           }
 
           docker version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker daemon is not available."
+          }
 
-      # 4. Install Trivy using the official release API
-      - name: Install Trivy if missing
+      # 4. Install Trivy using the official latest release redirect
+      - name: Install Trivy
         id: install-trivy
         if: always()
         shell: powershell
@@ -86,54 +89,52 @@ jobs:
 
           $toolDirectory = Join-Path $env:USERPROFILE ".tools\trivy"
           $trivyExe = Join-Path $toolDirectory "trivy.exe"
-          $version = $env:TRIVY_VERSION.TrimStart("v")
 
           New-Item -ItemType Directory -Path $toolDirectory -Force |
             Out-Null
 
+          # Reuse a working Trivy binary from previous runs.
           if (Test-Path $trivyExe) {
-            $currentVersion = (& $trivyExe --version 2>&1 | Out-String)
+            $versionOutput = (& $trivyExe --version 2>&1 | Out-String)
 
-            if ($currentVersion -match [regex]::Escape($version)) {
-              Write-Host "Trivy $version is already installed."
-              & $trivyExe --version
+            if ($LASTEXITCODE -eq 0 -and $versionOutput -match "Version:") {
+              Write-Host "Using cached Trivy installation."
+              Write-Host $versionOutput
               exit 0
             }
+
+            Remove-Item $trivyExe -Force -ErrorAction SilentlyContinue
           }
 
-          $releaseUrl = "https://api.github.com/repos/aquasecurity/trivy/releases/tags/v$version"
+          # Resolve the actual published release instead of guessing a tag.
+          $releasePage = "https://github.com/aquasecurity/trivy/releases/latest"
 
-          Write-Host "Getting Trivy release metadata..."
+          Write-Host "Resolving latest Trivy release..."
 
-          $release = Invoke-RestMethod `
-            -Uri $releaseUrl `
-            -Headers @{
-              "User-Agent" = "EFK-Logging-CI"
-              "Accept" = "application/vnd.github+json"
-            }
+          $response = Invoke-WebRequest `
+            -Uri $releasePage `
+            -MaximumRedirection 10 `
+            -UseBasicParsing
 
-          $asset = $release.assets |
-            Where-Object {
-              $_.name -match '(?i)^trivy_.*_windows-64bit\.zip$'
-            } |
-            Select-Object -First 1
+          $finalUrl = $response.BaseResponse.ResponseUri.AbsoluteUri
 
-          if (-not $asset) {
-            $available = ($release.assets |
-              Select-Object -ExpandProperty name) -join ", "
-
-            throw "Windows ZIP asset not found for Trivy $version. Assets: $available"
+          if ($finalUrl -notmatch '/releases/tag/(v[0-9.]+)$') {
+            throw "Unable to determine the Trivy version from release URL: $finalUrl"
           }
 
-          $zipPath = Join-Path $env:TEMP $asset.name
+          $version = $Matches[1].TrimStart("v")
+          $assetName = "trivy_${version}_windows-64bit.zip"
+          $downloadUrl = "https://github.com/aquasecurity/trivy/releases/download/v$version/$assetName"
+
+          $zipPath = Join-Path $env:TEMP $assetName
           $extractPath = Join-Path $env:TEMP "trivy-extract"
 
-          Write-Host "Downloading $($asset.name)..."
+          Write-Host "Downloading Trivy $version..."
 
           Invoke-WebRequest `
-            -Uri $asset.browser_download_url `
+            -Uri $downloadUrl `
             -OutFile $zipPath `
-            -Headers @{ "User-Agent" = "EFK-Logging-CI" }
+            -UseBasicParsing
 
           if (Test-Path $extractPath) {
             Remove-Item $extractPath -Recurse -Force
@@ -154,7 +155,7 @@ jobs:
             Select-Object -First 1
 
           if (-not $downloadedExe) {
-            throw "trivy.exe was not found inside the downloaded archive."
+            throw "The downloaded archive does not contain trivy.exe."
           }
 
           Copy-Item $downloadedExe.FullName $trivyExe -Force
@@ -183,7 +184,7 @@ jobs:
             -Dsonar.python.version=3.12
         continue-on-error: true
 
-      # 6. Python dependencies
+      # 6. Install application dependencies
       - name: Install Python dependencies
         id: dependencies
         if: always()
@@ -198,15 +199,15 @@ jobs:
           if (Test-Path "app/requirements.txt") {
             python -m pip install --upgrade pip
             if ($LASTEXITCODE -ne 0) {
-              throw "Failed to upgrade pip."
+              throw "pip upgrade failed."
             }
 
             python -m pip install -r app/requirements.txt
             if ($LASTEXITCODE -ne 0) {
-              throw "Failed to install Python dependencies."
+              throw "Python dependency installation failed."
             }
           } else {
-            Write-Host "No app/requirements.txt found; skipping dependency installation."
+            Write-Host "No requirements file found; skipping dependency installation."
           }
         continue-on-error: true
 
@@ -237,7 +238,7 @@ jobs:
           }
         continue-on-error: true
 
-      # 8. Helm lint
+      # 8. Helm chart lint
       - name: Helm lint
         id: helm-lint
         if: always()
@@ -246,7 +247,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           if (-not (Test-Path "$env:CHART_PATH/Chart.yaml")) {
-            throw "Chart.yaml not found in $env:CHART_PATH"
+            throw "Chart not found at $env:CHART_PATH"
           }
 
           helm lint $env:CHART_PATH
@@ -256,7 +257,7 @@ jobs:
           }
         continue-on-error: true
 
-      # 9. Validate Helm templates
+      # 9. Helm template validation
       - name: Helm template validation
         id: helm-template
         if: always()
@@ -283,12 +284,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "${username}/$env:IMAGE_NAME`:$env:GITHUB_SHA"
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME)) {
+            throw "DOCKERHUB_USERNAME is missing."
+          }
 
           if (-not (Test-Path "app/Dockerfile")) {
-            throw "Dockerfile not found at app/Dockerfile"
+            throw "Dockerfile not found at app/Dockerfile."
           }
+
+          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
+          $image = "${username}/$env:IMAGE_NAME`:$env:GITHUB_SHA"
 
           Write-Host "Building $image"
 
@@ -301,10 +306,7 @@ jobs:
             throw "Docker build failed."
           }
 
-          Write-Host "Docker build completed."
-        continue-on-error: true
-
-      # 11. Push image to Docker Hub
+      # 11. Push Docker image
       - name: Push image to Docker Hub
         id: docker-push
         if: always()
@@ -327,7 +329,7 @@ jobs:
             docker login --username $username --password-stdin
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub login failed. Verify the token has write permissions."
+            throw "Docker Hub login failed. Check the token's write permissions."
           }
 
           docker push $image
@@ -336,11 +338,11 @@ jobs:
             throw "Docker image push failed."
           }
 
-          Write-Host "Pushed image: $image"
+          Write-Host "Image pushed successfully: $image"
         continue-on-error: true
 
-      # 12. Scan the Docker image
-      - name: Trivy Docker image scan
+      # 12. Trivy Docker image scan
+      - name: Trivy image scan
         id: trivy-image
         if: always()
         shell: powershell
@@ -371,16 +373,17 @@ jobs:
           }
         continue-on-error: true
 
-      # 13. Logout
+      # 13. Docker logout
       - name: Docker Hub logout
         if: always()
         shell: powershell
         run: |
           docker logout
-          Write-Host "Docker logout step finished."
+          Write-Host "Docker logout completed."
 
-      # 14. Final result
+      # 14. Final pipeline status
       - name: Pipeline summary
+        id: summary
         if: always()
         shell: powershell
         env:
@@ -398,16 +401,16 @@ jobs:
           $ErrorActionPreference = "Continue"
 
           $results = [ordered]@{
-            "Validate tools and secrets" = $env:VALIDATE
-            "Install Trivy"              = $env:TRIVY_INSTALL
-            "SonarQube analysis"         = $env:SONAR
-            "Python dependencies"        = $env:DEPENDENCIES
-            "Trivy filesystem scan"      = $env:TRIVY_FS
-            "Helm lint"                  = $env:HELM_LINT
-            "Helm template validation"   = $env:HELM_TEMPLATE
-            "Docker build"               = $env:DOCKER_BUILD
-            "Docker Hub push"            = $env:DOCKER_PUSH
-            "Trivy image scan"           = $env:TRIVY_IMAGE
+            "Tools and secrets validation" = $env:VALIDATE
+            "Trivy installation"            = $env:TRIVY_INSTALL
+            "SonarQube analysis"            = $env:SONAR
+            "Python dependencies"           = $env:DEPENDENCIES
+            "Trivy filesystem scan"         = $env:TRIVY_FS
+            "Helm lint"                     = $env:HELM_LINT
+            "Helm template validation"      = $env:HELM_TEMPLATE
+            "Docker build"                  = $env:DOCKER_BUILD
+            "Docker Hub push"               = $env:DOCKER_PUSH
+            "Trivy image scan"              = $env:TRIVY_IMAGE
           }
 
           Write-Host ""
