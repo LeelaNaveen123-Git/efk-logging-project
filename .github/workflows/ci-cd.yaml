@@ -415,19 +415,40 @@ jobs:
             throw "Could not apply Kubernetes image pull secret."
           }
 
-      - name: Configure ECR pull secret on deployment
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
 
-          kubectl patch deployment $env:K8S_DEPLOYMENT `
-            --namespace $env:K8S_NAMESPACE `
-            --type=strategic `
-            --patch '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ecr-registry"}]}}}}'
+      
+- name: Configure ECR image pull secret
+  shell: powershell
+  env:
+    AWS_REGION: ${{ secrets.AWS_REGION }}
+    AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  run: |
+    $ErrorActionPreference = "Stop"
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not configure the deployment image pull secret."
-          }
+    $registry = "$($env:AWS_ACCOUNT_ID).dkr.ecr.$($env:AWS_REGION).amazonaws.com"
+    $password = aws ecr get-login-password --region $env:AWS_REGION
+
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($password)) {
+      throw "Failed to retrieve ECR login password."
+    }
+
+    $manifest = kubectl create secret docker-registry ecr-registry-secret `
+      --docker-server=$registry `
+      --docker-username=AWS `
+      --docker-password=$password `
+      --namespace=default `
+      --dry-run=client `
+      --output=yaml
+
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to generate secret manifest."
+    }
+
+    $manifest -join "`n" | kubectl apply -f -
+
+    if ($LASTEXITCODE -ne 0) {
+      throw "Could not configure the deployment image pull secret."
+    }
 
       - name: Verify rollout
         shell: powershell
