@@ -31,19 +31,19 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Checkout source code
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify required tools
+      - name: Verify tools
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           foreach ($tool in @("git", "docker", "kubectl", "helm")) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-              throw "$tool is missing from PATH."
+              throw "$tool is not installed or not in PATH."
             }
           }
 
@@ -70,13 +70,8 @@ jobs:
           $zipPath = Join-Path $env:RUNNER_TEMP "trivy.zip"
           $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
 
-          Invoke-WebRequest `
-            -Uri $asset.browser_download_url `
-            -OutFile $zipPath
-
-          New-Item -ItemType Directory -Path $trivyDir -Force |
-            Out-Null
-
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+          New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
           Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
 
           if (-not (Test-Path (Join-Path $trivyDir "trivy.exe"))) {
@@ -85,7 +80,7 @@ jobs:
 
           Add-Content -Path $env:GITHUB_PATH -Value $trivyDir
 
-      - name: Trivy filesystem security scan
+      - name: Trivy filesystem scan
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -99,7 +94,7 @@ jobs:
             .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy filesystem scan failed. Review the findings."
+            throw "Trivy filesystem scan failed."
           }
 
       - name: Helm lint
@@ -125,13 +120,13 @@ jobs:
             throw "Helm template validation failed."
           }
 
-      - name: SonarQube code analysis
+      - name: SonarQube analysis
         uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: SonarQube quality gate - PowerShell
+      - name: SonarQube quality gate using PowerShell
         shell: powershell
         timeout-minutes: 6
         env:
@@ -151,7 +146,7 @@ jobs:
           $reportPath = Join-Path $env:GITHUB_WORKSPACE ".scannerwork/report-task.txt"
 
           if (-not (Test-Path $reportPath)) {
-            throw "SonarQube report not found: $reportPath"
+            throw "SonarQube report-task.txt was not found."
           }
 
           $metadata = @{}
@@ -165,41 +160,33 @@ jobs:
           $taskId = $metadata["ceTaskId"]
 
           if ([string]::IsNullOrWhiteSpace($taskId)) {
-            throw "ceTaskId is missing from the SonarQube report."
+            throw "SonarQube ceTaskId was not found."
           }
 
           $sonarUrl = $env:SONAR_HOST_URL.TrimEnd("/")
-          $pair = "${env:SONAR_TOKEN}:"
-          $encodedPair = [Convert]::ToBase64String(
-            [Text.Encoding]::UTF8.GetBytes($pair)
+          $credential = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes("${env:SONAR_TOKEN}:")
           )
 
-          $headers = @{
-            Authorization = "Basic $encodedPair"
-          }
-
+          $headers = @{ Authorization = "Basic $credential" }
           $deadline = (Get-Date).AddMinutes(5)
           $analysisId = $null
 
-          Write-Host "Waiting for SonarQube analysis task: $taskId"
-
           do {
-            $taskUrl = "$sonarUrl/api/ce/task?id=$taskId"
-            $taskResponse = Invoke-RestMethod `
-              -Uri $taskUrl `
-              -Headers $headers `
-              -Method Get
+            $task = Invoke-RestMethod `
+              -Uri "$sonarUrl/api/ce/task?id=$taskId" `
+              -Headers $headers
 
-            $taskStatus = $taskResponse.task.status
-            Write-Host "SonarQube task status: $taskStatus"
+            $status = $task.task.status
+            Write-Host "SonarQube task status: $status"
 
-            if ($taskStatus -eq "SUCCESS") {
-              $analysisId = $taskResponse.task.analysisId
+            if ($status -eq "SUCCESS") {
+              $analysisId = $task.task.analysisId
               break
             }
 
-            if ($taskStatus -in @("FAILED", "CANCELED")) {
-              throw "SonarQube analysis task ended with status $taskStatus."
+            if ($status -in @("FAILED", "CANCELED")) {
+              throw "SonarQube analysis ended with status $status."
             }
 
             if ((Get-Date) -ge $deadline) {
@@ -213,22 +200,18 @@ jobs:
             throw "SonarQube did not return an analysis ID."
           }
 
-          $gateUrl = "$sonarUrl/api/qualitygates/project_status?analysisId=$analysisId"
+          $gate = Invoke-RestMethod `
+            -Uri "$sonarUrl/api/qualitygates/project_status?analysisId=$analysisId" `
+            -Headers $headers
 
-          $gateResponse = Invoke-RestMethod `
-            -Uri $gateUrl `
-            -Headers $headers `
-            -Method Get
-
-          $gateStatus = $gateResponse.projectStatus.status
-
+          $gateStatus = $gate.projectStatus.status
           Write-Host "SonarQube Quality Gate: $gateStatus"
 
           if ($gateStatus -ne "OK") {
-            throw "SonarQube Quality Gate did not pass: $gateStatus"
+            throw "SonarQube quality gate failed: $gateStatus"
           }
 
-          Write-Host "SonarQube Quality Gate passed."
+          Write-Host "SonarQube quality gate passed."
 
   build-scan-push-deploy:
     name: Docker Build, ECR Push and Helm Deploy
@@ -237,7 +220,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Checkout source code
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Install Trivy
@@ -259,13 +242,8 @@ jobs:
           $zipPath = Join-Path $env:RUNNER_TEMP "trivy.zip"
           $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
 
-          Invoke-WebRequest `
-            -Uri $asset.browser_download_url `
-            -OutFile $zipPath
-
-          New-Item -ItemType Directory -Path $trivyDir -Force |
-            Out-Null
-
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+          New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
           Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
 
           if (-not (Test-Path (Join-Path $trivyDir "trivy.exe"))) {
@@ -273,6 +251,25 @@ jobs:
           }
 
           Add-Content -Path $env:GITHUB_PATH -Value $trivyDir
+
+      - name: Verify application build files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $requiredFiles = @(
+            "app/Dockerfile",
+            "app/app.py",
+            "app/requirements.txt"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required build file not found: $file. Check the actual app directory structure."
+            }
+          }
+
+          Write-Host "Application build files verified."
 
       - name: Build Docker image
         shell: powershell
@@ -282,10 +279,13 @@ jobs:
           $imageTag = "${{ github.sha }}"
           $localImage = "${env:ECR_REPOSITORY}:$imageTag"
 
+          # The app directory is the Docker build context.
+          # Dockerfile COPY instructions can now access app.py
+          # and requirements.txt within that directory.
           docker build --pull `
             --file app/Dockerfile `
             --tag $localImage `
-            .
+            app
 
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image build failed."
@@ -416,7 +416,7 @@ jobs:
             throw "Could not apply Kubernetes image pull secret."
           }
 
-      - name: Deploy application using Helm
+      - name: Deploy using Helm
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -430,7 +430,7 @@ jobs:
             throw "Helm deployment failed."
           }
 
-      - name: Configure ECR image pull secret on deployment
+      - name: Configure ECR pull secret on deployment
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -444,7 +444,7 @@ jobs:
             throw "Could not configure the deployment image pull secret."
           }
 
-      - name: Verify deployment rollout
+      - name: Verify rollout
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
