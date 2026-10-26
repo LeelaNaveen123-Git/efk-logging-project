@@ -1,8 +1,8 @@
-replicaCount: 1
+﻿replicaCount: 1
 
 image:
   repository: efk-demo-app
-  tag: "1.0.0"
+  tag: "19984db72672dc95d4f481b794b5ea553c2659b4"
   pullPolicy: IfNotPresent
 
 containerPort: 8080
