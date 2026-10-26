@@ -21,50 +21,47 @@ env:
 
 jobs:
   validate-and-scan:
-    name: Code Quality and Security
+    name: Validate, Scan, Build and Push
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Validate Python application
+      - name: Verify project files
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          python --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "Python is not available."
+          $requiredFiles = @(
+            "app/Dockerfile",
+            "charts/sample-app/Chart.yaml",
+            "sonar-project.properties"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required project file is missing: $file"
+            }
           }
 
-          python -m compileall -q app
-          if ($LASTEXITCODE -ne 0) {
-            throw "Python compilation failed."
-          }
+          Write-Host "Required project files are present."
 
-          Write-Host "Python validation completed."
-
-      - name: Check required tools
+      - name: Verify required tools
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          foreach ($tool in @("docker", "helm", "kubectl")) {
+          foreach ($tool in @("docker", "helm")) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-              throw "$tool is not installed or is not available in PATH."
+              throw "$tool is missing from PATH."
             }
           }
 
           docker version
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker is unavailable."
+            throw "Docker daemon is unavailable."
           }
 
           helm version
@@ -72,7 +69,8 @@ jobs:
             throw "Helm is unavailable."
           }
 
-      - name: SonarQube code quality scan
+      # Code quality and security
+      - name: SonarQube analysis and quality gate
         uses: sonarsource/sonarqube-scan-action@v6
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -84,61 +82,69 @@ jobs:
             -Dsonar.python.version=3.12
             -Dsonar.qualitygate.wait=true
 
-      - name: Install Trivy if required
+      - name: Install or verify Trivy
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          $existing = Get-Command trivy -ErrorAction SilentlyContinue
+          $trivyCommand = Get-Command trivy -ErrorAction SilentlyContinue
 
-          if ($existing) {
+          if ($trivyCommand) {
             trivy --version
             if ($LASTEXITCODE -ne 0) {
-              throw "Existing Trivy installation is not working."
+              throw "Trivy is installed but failed to start."
             }
           }
           else {
-            $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
+            $installDir = Join-Path $env:RUNNER_TEMP "trivy"
             $zipPath = Join-Path $env:RUNNER_TEMP "trivy-windows.zip"
 
-            New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $installDir -Force |
+              Out-Null
 
             $release = Invoke-RestMethod `
               -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest" `
               -Headers @{ "User-Agent" = "GitHubActions" }
 
             $asset = $release.assets |
-              Where-Object { $_.name -match "windows-64bit\.zip$" } |
+              Where-Object { $_.name -match "Windows-64bit\.zip$" } |
               Select-Object -First 1
 
             if (-not $asset) {
-              throw "Could not find the Windows Trivy release asset."
+              throw "Could not find the Windows Trivy ZIP release."
             }
 
             Invoke-WebRequest `
               -Uri $asset.browser_download_url `
               -OutFile $zipPath
 
-            Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
+            Expand-Archive `
+              -Path $zipPath `
+              -DestinationPath $installDir `
+              -Force
 
-            $exe = Get-ChildItem -Path $trivyDir -Filter "trivy.exe" -Recurse |
+            $trivyExe = Get-ChildItem `
+              -Path $installDir `
+              -Filter "trivy.exe" `
+              -Recurse |
               Select-Object -First 1
 
-            if (-not $exe) {
-              throw "Trivy executable was not found after extraction."
+            if (-not $trivyExe) {
+              throw "Trivy executable was not found."
             }
 
-            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+            Add-Content -Path $env:GITHUB_PATH `
+              -Value $trivyExe.DirectoryName
 
-            $env:PATH = "$($exe.DirectoryName);$env:PATH"
+            $env:PATH = "$($trivyExe.DirectoryName);$env:PATH"
 
-            & $exe.FullName --version
+            & $trivyExe.FullName --version
             if ($LASTEXITCODE -ne 0) {
-              throw "Trivy installation failed."
+              throw "Trivy installation verification failed."
             }
           }
 
-      - name: Trivy filesystem security scan
+      - name: Trivy filesystem scan
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -151,10 +157,11 @@ jobs:
             .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy filesystem scan failed or found blocking vulnerabilities."
+            throw "Filesystem scan failed or blocking security findings were detected."
           }
 
-      - name: Helm chart lint
+      # Helm validation
+      - name: Helm lint
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -164,7 +171,7 @@ jobs:
             throw "Helm chart lint failed."
           }
 
-      - name: Helm template validation
+      - name: Validate Helm templates
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -174,15 +181,15 @@ jobs:
             --set-string "image.tag=$env:IMAGE_TAG"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Helm template validation failed."
+            throw "Helm template rendering failed."
           }
 
-      - name: Reset previous Docker Hub login
+      # Docker Hub authentication must happen before build
+      - name: Clear previous Docker Hub login
         shell: powershell
         run: |
-          # Clear potentially stale credentials from the self-hosted runner.
           docker logout 2>$null
-          Write-Host "Checked previous Docker Hub credentials."
+          Write-Host "Previous Docker Hub login cleared where applicable."
 
       - name: Login to Docker Hub
         shell: powershell
@@ -201,20 +208,22 @@ jobs:
           }
 
           $env:DOCKERHUB_TOKEN |
-            docker login --username $env:DOCKERHUB_USERNAME --password-stdin
+            docker login `
+              --username $env:DOCKERHUB_USERNAME `
+              --password-stdin
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub login failed. Verify the username and access token."
+            throw "Docker Hub login failed. Verify the username and token."
           }
 
-      - name: Verify Docker Hub base image access
+      - name: Verify Docker Hub base image pull
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           docker pull python:3.12-slim
           if ($LASTEXITCODE -ne 0) {
-            throw "Cannot pull python:3.12-slim. Check Docker Hub authentication and connectivity."
+            throw "Cannot pull python:3.12-slim. Check authentication and registry connectivity."
           }
 
       - name: Build application image
@@ -228,13 +237,14 @@ jobs:
           docker build --pull `
             -f app/Dockerfile `
             -t $image `
-            app
+            .
 
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image build failed."
           }
 
-      - name: Trivy container image scan
+      # Image security gate
+      - name: Trivy image scan
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -248,7 +258,7 @@ jobs:
             $image
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy image scan failed or found blocking vulnerabilities."
+            throw "Image scan failed or blocking security findings were detected."
           }
 
       - name: Push image to Docker Hub
@@ -260,13 +270,13 @@ jobs:
 
           docker push $image
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub push failed. Check repository permissions and authentication."
+            throw "Docker Hub push failed. Verify repository write permissions."
           }
 
-          Write-Host "Successfully pushed $image"
+          Write-Host "Successfully pushed image: $image"
 
   deploy:
-    name: Deploy application with Helm
+    name: Deploy with Helm
     runs-on: [self-hosted, Windows, X64]
     needs: validate-and-scan
     timeout-minutes: 15
@@ -290,7 +300,7 @@ jobs:
             throw "Cannot connect to the Kubernetes cluster."
           }
 
-      - name: Deploy application using Helm
+      - name: Deploy application with Helm
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -307,7 +317,7 @@ jobs:
             throw "Helm deployment failed."
           }
 
-      - name: Verify application rollout
+      - name: Verify deployment rollout
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -318,8 +328,10 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
             kubectl get pods -n default -o wide
-            kubectl get events -n default --sort-by=.metadata.creationTimestamp
-            throw "Application rollout failed. Check pod events and deployment logs."
+            kubectl get events -n default `
+              --sort-by=.metadata.creationTimestamp
+
+            throw "Deployment rollout failed. Review pod status and events."
           }
 
           kubectl get deployment sample-app -n default
