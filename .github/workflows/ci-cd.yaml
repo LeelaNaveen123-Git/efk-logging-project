@@ -1,3 +1,4 @@
+
 name: EFK Logging Project CI/CD
 
 on:
@@ -26,21 +27,23 @@ env:
 
 jobs:
   validate-and-scan:
-    name: Validate, SonarQube, Trivy, Helm
+    name: SonarQube, Trivy and Helm Validation
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Checkout source
+      - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Check required tools
+      - name: Verify required tools
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           foreach ($tool in @("git", "docker", "kubectl", "helm")) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-              throw "$tool is not installed or is not available in PATH."
+              throw "$tool is missing from PATH."
             }
           }
 
@@ -61,18 +64,23 @@ jobs:
             Select-Object -First 1
 
           if (-not $asset) {
-            throw "Could not find the Trivy Windows 64-bit release."
+            throw "Trivy Windows 64-bit package was not found."
           }
 
           $zipPath = Join-Path $env:RUNNER_TEMP "trivy.zip"
           $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
 
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-          New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+          Invoke-WebRequest `
+            -Uri $asset.browser_download_url `
+            -OutFile $zipPath
+
+          New-Item -ItemType Directory -Path $trivyDir -Force |
+            Out-Null
+
           Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
 
           if (-not (Test-Path (Join-Path $trivyDir "trivy.exe"))) {
-            throw "Trivy executable was not found after extraction."
+            throw "Trivy executable was not extracted."
           }
 
           Add-Content -Path $env:GITHUB_PATH -Value $trivyDir
@@ -87,10 +95,11 @@ jobs:
             --severity HIGH,CRITICAL `
             --ignore-unfixed `
             --exit-code 1 `
+            --skip-dirs .git `
             .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy filesystem scan failed. Review the reported findings."
+            throw "Trivy filesystem scan failed. Review the findings."
           }
 
       - name: Helm lint
@@ -99,6 +108,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           helm lint $env:HELM_CHART_PATH
+
           if ($LASTEXITCODE -ne 0) {
             throw "Helm lint failed."
           }
@@ -109,35 +119,125 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           helm template sample-app $env:HELM_CHART_PATH `
-            --namespace $env:K8S_NAMESPACE `
-            --debug
+            --namespace $env:K8S_NAMESPACE
 
           if ($LASTEXITCODE -ne 0) {
             throw "Helm template validation failed."
           }
 
-      - name: SonarQube analysis
+      - name: SonarQube code analysis
         uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: Check SonarQube quality gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        timeout-minutes: 5
+      - name: SonarQube quality gate - PowerShell
+        shell: powershell
+        timeout-minutes: 6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
+            throw "SONAR_TOKEN secret is missing."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:SONAR_HOST_URL)) {
+            throw "SONAR_HOST_URL secret is missing."
+          }
+
+          $reportPath = Join-Path $env:GITHUB_WORKSPACE ".scannerwork/report-task.txt"
+
+          if (-not (Test-Path $reportPath)) {
+            throw "SonarQube report not found: $reportPath"
+          }
+
+          $metadata = @{}
+
+          Get-Content $reportPath | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $metadata[$matches[1]] = $matches[2]
+            }
+          }
+
+          $taskId = $metadata["ceTaskId"]
+
+          if ([string]::IsNullOrWhiteSpace($taskId)) {
+            throw "ceTaskId is missing from the SonarQube report."
+          }
+
+          $sonarUrl = $env:SONAR_HOST_URL.TrimEnd("/")
+          $pair = "${env:SONAR_TOKEN}:"
+          $encodedPair = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($pair)
+          )
+
+          $headers = @{
+            Authorization = "Basic $encodedPair"
+          }
+
+          $deadline = (Get-Date).AddMinutes(5)
+          $analysisId = $null
+
+          Write-Host "Waiting for SonarQube analysis task: $taskId"
+
+          do {
+            $taskUrl = "$sonarUrl/api/ce/task?id=$taskId"
+            $taskResponse = Invoke-RestMethod `
+              -Uri $taskUrl `
+              -Headers $headers `
+              -Method Get
+
+            $taskStatus = $taskResponse.task.status
+            Write-Host "SonarQube task status: $taskStatus"
+
+            if ($taskStatus -eq "SUCCESS") {
+              $analysisId = $taskResponse.task.analysisId
+              break
+            }
+
+            if ($taskStatus -in @("FAILED", "CANCELED")) {
+              throw "SonarQube analysis task ended with status $taskStatus."
+            }
+
+            if ((Get-Date) -ge $deadline) {
+              throw "Timed out waiting for SonarQube analysis."
+            }
+
+            Start-Sleep -Seconds 5
+          } while ($true)
+
+          if ([string]::IsNullOrWhiteSpace($analysisId)) {
+            throw "SonarQube did not return an analysis ID."
+          }
+
+          $gateUrl = "$sonarUrl/api/qualitygates/project_status?analysisId=$analysisId"
+
+          $gateResponse = Invoke-RestMethod `
+            -Uri $gateUrl `
+            -Headers $headers `
+            -Method Get
+
+          $gateStatus = $gateResponse.projectStatus.status
+
+          Write-Host "SonarQube Quality Gate: $gateStatus"
+
+          if ($gateStatus -ne "OK") {
+            throw "SonarQube Quality Gate did not pass: $gateStatus"
+          }
+
+          Write-Host "SonarQube Quality Gate passed."
 
   build-scan-push-deploy:
-    name: Docker Build, ECR Push, Helm Deploy
+    name: Docker Build, ECR Push and Helm Deploy
     needs: validate-and-scan
-    # Do not push images or deploy from pull requests.
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Checkout source
+      - name: Checkout source code
         uses: actions/checkout@v4
 
       - name: Install Trivy
@@ -153,18 +253,23 @@ jobs:
             Select-Object -First 1
 
           if (-not $asset) {
-            throw "Could not find the Trivy Windows 64-bit release."
+            throw "Trivy Windows 64-bit package was not found."
           }
 
           $zipPath = Join-Path $env:RUNNER_TEMP "trivy.zip"
           $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
 
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-          New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+          Invoke-WebRequest `
+            -Uri $asset.browser_download_url `
+            -OutFile $zipPath
+
+          New-Item -ItemType Directory -Path $trivyDir -Force |
+            Out-Null
+
           Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
 
           if (-not (Test-Path (Join-Path $trivyDir "trivy.exe"))) {
-            throw "Trivy executable was not found after extraction."
+            throw "Trivy executable was not extracted."
           }
 
           Add-Content -Path $env:GITHUB_PATH -Value $trivyDir
@@ -175,29 +280,30 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $imageTag = "${{ github.sha }}"
+          $localImage = "${env:ECR_REPOSITORY}:$imageTag"
 
           docker build --pull `
             --file app/Dockerfile `
-            --tag "$env:ECR_REPOSITORY`:$imageTag" `
+            --tag $localImage `
             .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker build failed."
+            throw "Docker image build failed."
           }
 
-      - name: Trivy Docker image scan
+      - name: Trivy container image scan
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           $imageTag = "${{ github.sha }}"
-          $image = "$env:ECR_REPOSITORY`:$imageTag"
+          $localImage = "${env:ECR_REPOSITORY}:$imageTag"
 
           trivy image `
             --severity HIGH,CRITICAL `
             --ignore-unfixed `
             --exit-code 1 `
-            $image
+            $localImage
 
           if ($LASTEXITCODE -ne 0) {
             throw "Trivy image scan failed. Image will not be pushed."
@@ -208,6 +314,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
 
       - name: Verify AWS identity
         shell: powershell
@@ -215,15 +322,15 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           aws sts get-caller-identity
+
           if ($LASTEXITCODE -ne 0) {
             throw "AWS authentication failed."
           }
 
       - name: Login to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Tag and push Docker image
+      - name: Push Docker image to ECR
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -232,45 +339,53 @@ jobs:
           $region = "${{ secrets.AWS_REGION }}"
           $imageTag = "${{ github.sha }}"
           $registry = "$accountId.dkr.ecr.$region.amazonaws.com"
-          $repository = "$registry/$env:ECR_REPOSITORY"
+          $remoteImage = "$registry/$env:ECR_REPOSITORY`:$imageTag"
+          $localImage = "${env:ECR_REPOSITORY}:$imageTag"
 
           aws ecr describe-repositories `
             --repository-names $env:ECR_REPOSITORY `
             --region $region
 
           if ($LASTEXITCODE -ne 0) {
-            throw "ECR repository '$env:ECR_REPOSITORY' does not exist or cannot be accessed."
+            throw "ECR repository is missing or inaccessible."
           }
 
-          docker tag "$env:ECR_REPOSITORY`:$imageTag" "$repository`:$imageTag"
+          docker tag $localImage $remoteImage
+
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image tagging failed."
           }
 
-          docker push "$repository`:$imageTag"
+          docker push $remoteImage
+
           if ($LASTEXITCODE -ne 0) {
             throw "Docker image push failed."
           }
 
-          "IMAGE_REPOSITORY=$repository" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "IMAGE_TAG=$imageTag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "IMAGE_REPOSITORY=$registry/$env:ECR_REPOSITORY" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Verify Kubernetes context
+          "IMAGE_TAG=$imageTag" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Verify Kubernetes cluster
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           kubectl config current-context
+
           if ($LASTEXITCODE -ne 0) {
-            throw "No usable Kubernetes context is configured for the runner."
+            throw "Kubernetes context is not configured."
           }
 
           kubectl get nodes
+
           if ($LASTEXITCODE -ne 0) {
             throw "Kubernetes cluster is not reachable."
           }
 
-      - name: Configure ECR image pull secret
+      - name: Create or update ECR image pull secret
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -279,40 +394,43 @@ jobs:
           $registry = "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$region.amazonaws.com"
 
           $password = aws ecr get-login-password --region $region
+
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($password)) {
-            throw "Could not retrieve the ECR login password."
+            throw "Could not retrieve ECR credentials."
           }
 
-          kubectl create secret docker-registry ecr-registry `
+          $secretYaml = kubectl create secret docker-registry ecr-registry `
             --namespace $env:K8S_NAMESPACE `
             --docker-server=$registry `
             --docker-username=AWS `
             --docker-password=$password `
-            --dry-run=client -o yaml |
-            kubectl apply -f -
+            --dry-run=client -o yaml
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not create or update the ECR image pull secret."
+            throw "Could not generate Kubernetes image pull secret."
           }
 
-      - name: Deploy with Helm
+          $secretYaml | kubectl apply -f -
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not apply Kubernetes image pull secret."
+          }
+
+      - name: Deploy application using Helm
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           helm upgrade --install sample-app $env:HELM_CHART_PATH `
             --namespace $env:K8S_NAMESPACE `
-            --create-namespace `
-            --set-string image.repository="$env:IMAGE_REPOSITORY" `
-            --set-string image.tag="$env:IMAGE_TAG" `
-            --wait `
-            --timeout 5m
+            --set-string "image.repository=$env:IMAGE_REPOSITORY" `
+            --set-string "image.tag=$env:IMAGE_TAG"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Helm deployment failed."
           }
 
-      - name: Configure ECR pull secret on deployment
+      - name: Configure ECR image pull secret on deployment
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -323,10 +441,10 @@ jobs:
             --patch '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ecr-registry"}]}}}}'
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not configure the ECR image pull secret on the deployment."
+            throw "Could not configure the deployment image pull secret."
           }
 
-      - name: Verify rollout
+      - name: Verify deployment rollout
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -337,7 +455,7 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
             kubectl get pods --namespace $env:K8S_NAMESPACE
-            throw "Deployment rollout did not complete successfully."
+            throw "Application rollout failed."
           }
 
           kubectl get deployment $env:K8S_DEPLOYMENT `
