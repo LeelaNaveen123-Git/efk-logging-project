@@ -274,10 +274,10 @@ jobs:
           }
         continue-on-error: true
 
+
       # 10. Build Docker image
       - name: Build Docker image
         id: docker-build
-        if: always()
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -288,19 +288,20 @@ jobs:
             throw "DOCKERHUB_USERNAME is missing."
           }
 
+          if ([string]::IsNullOrWhiteSpace($env:IMAGE_NAME)) {
+            throw "IMAGE_NAME is missing."
+          }
+
           if (-not (Test-Path "app/Dockerfile")) {
             throw "Dockerfile not found at app/Dockerfile."
           }
 
           $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "${username}/$env:IMAGE_NAME`:$env:GITHUB_SHA"
+          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
 
-          Write-Host "Building $image"
+          Write-Host "Building image: $image"
 
-          docker build `
-            --file app/Dockerfile `
-            --tag $image `
-            app
+          docker build --file app/Dockerfile --tag $image app
 
           if ($LASTEXITCODE -ne 0) {
             throw "Docker build failed."
@@ -309,7 +310,6 @@ jobs:
       # 11. Push Docker image
       - name: Push image to Docker Hub
         id: docker-push
-        if: always()
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -323,13 +323,13 @@ jobs:
           }
 
           $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "${username}/$env:IMAGE_NAME`:$env:GITHUB_SHA"
+          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
 
           $env:DOCKERHUB_TOKEN |
-            docker login --username $username --password-stdin
+            docker login docker.io --username $username --password-stdin
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub login failed. Check the token's write permissions."
+            throw "Docker Hub login failed. Check credentials and token permissions."
           }
 
           docker push $image
@@ -339,26 +339,31 @@ jobs:
           }
 
           Write-Host "Image pushed successfully: $image"
-        continue-on-error: true
 
       # 12. Trivy Docker image scan
       - name: Trivy image scan
         id: trivy-image
-        if: always()
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           $ErrorActionPreference = "Stop"
 
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME) -or
+              [string]::IsNullOrWhiteSpace($env:IMAGE_NAME)) {
+            throw "Docker Hub username or image name is missing."
+          }
+
           $trivyExe = Join-Path $env:USERPROFILE ".tools\trivy\trivy.exe"
 
           if (-not (Test-Path $trivyExe)) {
-            throw "Trivy is not installed."
+            throw "Trivy is not installed at $trivyExe."
           }
 
           $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "${username}/$env:IMAGE_NAME`:$env:GITHUB_SHA"
+          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
+
+          Write-Host "Scanning image: $image"
 
           & $trivyExe image `
             --scanners vuln,secret `
@@ -369,9 +374,9 @@ jobs:
             $image
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy image scan reported findings or failed."
+            throw "Trivy image scan failed or found HIGH/CRITICAL issues."
           }
-        continue-on-error: true
+
 
       # 13. Docker logout
       - name: Docker Hub logout
