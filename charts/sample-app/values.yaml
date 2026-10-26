@@ -2,7 +2,7 @@
 
 image:
   repository: efk-demo-app
-  tag: "19984db72672dc95d4f481b794b5ea553c2659b4"
+  tag: "5b2efbf2af93d634f717b102a0f7a130e91f0684"
   pullPolicy: IfNotPresent
 
 containerPort: 8080
