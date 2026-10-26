@@ -3,333 +3,188 @@ name: EFK Logging Project CI/CD
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: efk-ci-${{ github.ref }}
+  group: efk-logging-project-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  ci-cd:
-    name: EFK CI/CD Pipeline
-    runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 60
+env:
+  IMAGE_REPOSITORY: docker.io/leelanaveen123/efk-demo-app
+  IMAGE_TAG: ${{ github.sha }}
+  CHART_PATH: charts/sample-app
 
-    env:
-      IMAGE_NAME: efk-demo-app
-      CHART_PATH: charts/sample-app
+jobs:
+  validate-and-scan:
+    name: Code Quality and Security
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 45
 
     steps:
-      # 1. Checkout source
-      - name: Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # 2. Use Python already installed on the runner
-      - name: Check installed Python
-        id: python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Python application
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-
-          $pythonExe = Get-Command python -ErrorAction Stop
-          Write-Host "Python executable: $($pythonExe.Source)"
 
           python --version
           if ($LASTEXITCODE -ne 0) {
             throw "Python is not available."
           }
 
-          python -c "import sys; print('Python executable:', sys.executable); print('Python version:', sys.version)"
+          python -m compileall -q app
           if ($LASTEXITCODE -ne 0) {
-            throw "Python verification failed."
+            throw "Python compilation failed."
           }
 
-      # 3. Validate tools, secrets and Docker daemon
-      - name: Validate tools and secrets
-        id: validate
+          Write-Host "Python validation completed."
+
+      - name: Check required tools
         shell: powershell
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          foreach ($tool in @("git", "docker", "helm", "python")) {
+          foreach ($tool in @("docker", "helm", "kubectl")) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-              throw "Required tool not found: $tool"
-            }
-            Write-Host "$tool is installed."
-          }
-
-          foreach ($secretName in @(
-            "DOCKERHUB_USERNAME",
-            "DOCKERHUB_TOKEN",
-            "SONAR_TOKEN"
-          )) {
-            if ([string]::IsNullOrWhiteSpace(
-              [Environment]::GetEnvironmentVariable($secretName)
-            )) {
-              throw "Required GitHub secret is missing: $secretName"
+              throw "$tool is not installed or is not available in PATH."
             }
           }
 
           docker version
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker daemon is unavailable."
+            throw "Docker is unavailable."
           }
 
-      # 4. Install or reuse Trivy
-      - name: Install Trivy
-        id: install-trivy
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $toolDirectory = Join-Path $env:USERPROFILE ".tools\trivy"
-          $trivyExe = Join-Path $toolDirectory "trivy.exe"
-
-          New-Item -ItemType Directory -Path $toolDirectory -Force |
-            Out-Null
-
-          if (Test-Path $trivyExe) {
-            & $trivyExe --version
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Using cached Trivy."
-              exit 0
-            }
-
-            Remove-Item $trivyExe -Force -ErrorAction SilentlyContinue
-          }
-
-          $releasePage = "https://github.com/aquasecurity/trivy/releases/latest"
-          $response = Invoke-WebRequest `
-            -Uri $releasePage `
-            -MaximumRedirection 10 `
-            -UseBasicParsing
-
-          $finalUrl = $response.BaseResponse.ResponseUri.AbsoluteUri
-
-          if ($finalUrl -notmatch '/releases/tag/(v[0-9.]+)$') {
-            throw "Unable to determine Trivy release version: $finalUrl"
-          }
-
-          $version = $Matches[1].TrimStart("v")
-          $assetName = "trivy_${version}_windows-64bit.zip"
-          $downloadUrl = "https://github.com/aquasecurity/trivy/releases/download/v$version/$assetName"
-
-          $zipPath = Join-Path $env:TEMP $assetName
-          $extractPath = Join-Path $env:TEMP "trivy-extract"
-
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-          if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force
-          }
-
-          New-Item -ItemType Directory -Path $extractPath -Force |
-            Out-Null
-
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-          $downloadedExe = Get-ChildItem $extractPath -Filter "trivy.exe" -Recurse |
-            Select-Object -First 1
-
-          if (-not $downloadedExe) {
-            throw "Downloaded archive does not contain trivy.exe."
-          }
-
-          Copy-Item $downloadedExe.FullName $trivyExe -Force
-
-          Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-
-          & $trivyExe --version
+          helm version
           if ($LASTEXITCODE -ne 0) {
-            throw "Trivy installation verification failed."
+            throw "Helm is unavailable."
           }
 
-      # 5. SonarQube static code analysis
-      - name: SonarQube code analysis
-        id: sonar
-        uses: SonarSource/sonarqube-scan-action@v6
+      - name: SonarQube code quality scan
+        uses: sonarsource/sonarqube-scan-action@v6
         env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'http://localhost:9000' }}
         with:
           args: >
             -Dsonar.projectKey=efk-logging-project
             -Dsonar.sources=app
             -Dsonar.python.version=3.12
-        continue-on-error: true
+            -Dsonar.qualitygate.wait=true
 
-      # 6. Install application dependencies
-      - name: Install Python dependencies
-        id: dependencies
+      - name: Install Trivy if required
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          if (-not (Test-Path "app/requirements.txt")) {
-            throw "app/requirements.txt was not found."
+          $existing = Get-Command trivy -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            trivy --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing Trivy installation is not working."
+            }
+          }
+          else {
+            $trivyDir = Join-Path $env:RUNNER_TEMP "trivy"
+            $zipPath = Join-Path $env:RUNNER_TEMP "trivy-windows.zip"
+
+            New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+
+            $release = Invoke-RestMethod `
+              -Uri "https://api.github.com/repos/aquasecurity/trivy/releases/latest" `
+              -Headers @{ "User-Agent" = "GitHubActions" }
+
+            $asset = $release.assets |
+              Where-Object { $_.name -match "windows-64bit\.zip$" } |
+              Select-Object -First 1
+
+            if (-not $asset) {
+              throw "Could not find the Windows Trivy release asset."
+            }
+
+            Invoke-WebRequest `
+              -Uri $asset.browser_download_url `
+              -OutFile $zipPath
+
+            Expand-Archive -Path $zipPath -DestinationPath $trivyDir -Force
+
+            $exe = Get-ChildItem -Path $trivyDir -Filter "trivy.exe" -Recurse |
+              Select-Object -First 1
+
+            if (-not $exe) {
+              throw "Trivy executable was not found after extraction."
+            }
+
+            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+
+            $env:PATH = "$($exe.DirectoryName);$env:PATH"
+
+            & $exe.FullName --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Trivy installation failed."
+            }
           }
 
-          python -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) {
-            throw "pip upgrade failed."
-          }
-
-          python -m pip install -r app/requirements.txt
-          if ($LASTEXITCODE -ne 0) {
-            throw "Dependency installation failed."
-          }
-        continue-on-error: true
-
-      # 7. Scan source files and configuration
-      - name: Trivy filesystem scan
-        id: trivy-fs
+      - name: Trivy filesystem security scan
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $trivyExe = Join-Path $env:USERPROFILE ".tools\trivy\trivy.exe"
 
-          if (-not (Test-Path $trivyExe)) {
-            throw "Trivy executable not found."
-          }
-
-          & $trivyExe fs `
-            --scanners vuln,secret,misconfig `
+          trivy fs `
+            --scanners vuln,misconfig,secret `
             --severity HIGH,CRITICAL `
-            --ignore-unfixed `
             --exit-code 1 `
-            --no-progress `
+            --skip-dirs .git `
             .
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Filesystem scan failed or reported HIGH/CRITICAL findings."
+            throw "Trivy filesystem scan failed or found blocking vulnerabilities."
           }
-        continue-on-error: true
 
-      # 8. Validate Helm chart
       - name: Helm chart lint
-        id: helm-lint
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          if (-not (Test-Path "$env:CHART_PATH/Chart.yaml")) {
-            throw "Helm chart not found: $env:CHART_PATH"
-          }
-
           helm lint $env:CHART_PATH
           if ($LASTEXITCODE -ne 0) {
-            throw "Helm lint failed."
+            throw "Helm chart lint failed."
           }
-        continue-on-error: true
 
-      # 9. Render Kubernetes manifests
       - name: Helm template validation
-        id: helm-template
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           helm template sample-app $env:CHART_PATH `
-            --namespace default
+            --set-string "image.repository=$env:IMAGE_REPOSITORY" `
+            --set-string "image.tag=$env:IMAGE_TAG"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Helm template validation failed."
           }
-        continue-on-error: true
 
-      # 10. Build image with a unique commit SHA tag
-      - name: Build Docker image
-        id: docker-build
+      - name: Reset previous Docker Hub login
         shell: powershell
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          $ErrorActionPreference = "Stop"
+          # Clear potentially stale credentials from the self-hosted runner.
+          docker logout 2>$null
+          Write-Host "Checked previous Docker Hub credentials."
 
-          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME)) {
-            throw "DOCKERHUB_USERNAME is missing."
-          }
-
-          if (-not (Test-Path "app/Dockerfile")) {
-            throw "app/Dockerfile was not found."
-          }
-
-          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
-
-          Write-Host "Building image: $image"
-
-          docker build `
-            --file app/Dockerfile `
-            --tag $image `
-            app
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Docker build failed."
-          }
-
-          docker image inspect $image | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "Built image is missing."
-          }
-        continue-on-error: true
-
-      # 11. Scan local image before publishing
-      - name: Trivy image scan
-        id: trivy-image
-        if: always() && steps.docker-build.outcome == 'success' && steps.install-trivy.outcome == 'success'
-        shell: powershell
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $trivyExe = Join-Path $env:USERPROFILE ".tools\trivy\trivy.exe"
-          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
-
-          & $trivyExe image `
-            --image-src docker `
-            --scanners vuln,secret `
-            --severity HIGH,CRITICAL `
-            --ignore-unfixed `
-            --exit-code 1 `
-            --no-progress `
-            $image
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Image scan failed or found HIGH/CRITICAL vulnerabilities."
-          }
-        continue-on-error: true
-
-      # 12. Push only when required checks succeed
-      - name: Push image to Docker Hub
-        id: docker-push
-        if: >-
-          always() &&
-          steps.python.outcome == 'success' &&
-          steps.validate.outcome == 'success' &&
-          steps.install-trivy.outcome == 'success' &&
-          steps.sonar.outcome == 'success' &&
-          steps.dependencies.outcome == 'success' &&
-          steps.trivy-fs.outcome == 'success' &&
-          steps.helm-lint.outcome == 'success' &&
-          steps.helm-template.outcome == 'success' &&
-          steps.docker-build.outcome == 'success' &&
-          steps.trivy-image.outcome == 'success'
+      - name: Login to Docker Hub
         shell: powershell
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -337,100 +192,135 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME) -or
-              [string]::IsNullOrWhiteSpace($env:DOCKERHUB_TOKEN)) {
-            throw "Docker Hub credentials are missing."
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_USERNAME)) {
+            throw "DOCKERHUB_USERNAME secret is missing."
           }
 
-          $username = $env:DOCKERHUB_USERNAME.Trim().ToLowerInvariant()
-          $image = "docker.io/${username}/$($env:IMAGE_NAME):$env:GITHUB_SHA"
-
-          Write-Host "Logging in to Docker Hub as $username"
+          if ([string]::IsNullOrWhiteSpace($env:DOCKERHUB_TOKEN)) {
+            throw "DOCKERHUB_TOKEN secret is missing."
+          }
 
           $env:DOCKERHUB_TOKEN |
-            docker login docker.io `
-              --username $username `
-              --password-stdin
+            docker login --username $env:DOCKERHUB_USERNAME --password-stdin
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub login failed. Verify the username and Read & Write token."
+            throw "Docker Hub login failed. Verify the username and access token."
           }
+
+      - name: Verify Docker Hub base image access
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          docker pull python:3.12-slim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cannot pull python:3.12-slim. Check Docker Hub authentication and connectivity."
+          }
+
+      - name: Build application image
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $image = "$($env:IMAGE_REPOSITORY):$($env:IMAGE_TAG)"
+          Write-Host "Building image: $image"
+
+          docker build --pull `
+            -f app/Dockerfile `
+            -t $image `
+            app
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker image build failed."
+          }
+
+      - name: Trivy container image scan
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $image = "$($env:IMAGE_REPOSITORY):$($env:IMAGE_TAG)"
+
+          trivy image `
+            --scanners vuln,secret `
+            --severity HIGH,CRITICAL `
+            --exit-code 1 `
+            $image
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Trivy image scan failed or found blocking vulnerabilities."
+          }
+
+      - name: Push image to Docker Hub
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $image = "$($env:IMAGE_REPOSITORY):$($env:IMAGE_TAG)"
 
           docker push $image
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker Hub push failed. Check repository permissions and authentication."
+          }
+
+          Write-Host "Successfully pushed $image"
+
+  deploy:
+    name: Deploy application with Helm
+    runs-on: [self-hosted, Windows, X64]
+    needs: validate-and-scan
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Verify Kubernetes connectivity
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          kubectl config current-context
+          if ($LASTEXITCODE -ne 0) {
+            throw "No valid Kubernetes context is configured."
+          }
+
+          kubectl cluster-info
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cannot connect to the Kubernetes cluster."
+          }
+
+      - name: Deploy application using Helm
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          helm upgrade --install sample-app $env:CHART_PATH `
+            --namespace default `
+            --create-namespace `
+            --set-string "image.repository=$env:IMAGE_REPOSITORY" `
+            --set-string "image.tag=$env:IMAGE_TAG" `
+            --wait `
+            --timeout 5m
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Docker Hub push failed. Check the Docker CLI error above."
+            throw "Helm deployment failed."
           }
 
-          Write-Host "Successfully pushed: $image"
-        continue-on-error: true
-
-      # 13. Always attempt logout
-      - name: Docker Hub logout
-        if: always()
+      - name: Verify application rollout
         shell: powershell
         run: |
-          docker logout docker.io
-          Write-Host "Docker logout step completed."
+          $ErrorActionPreference = "Stop"
 
-      # 14. Final status summary
-      - name: Pipeline summary
-        id: summary
-        if: always()
-        shell: powershell
-        env:
-          PYTHON: ${{ steps.python.outcome }}
-          VALIDATE: ${{ steps.validate.outcome }}
-          TRIVY_INSTALL: ${{ steps.install-trivy.outcome }}
-          SONAR: ${{ steps.sonar.outcome }}
-          DEPENDENCIES: ${{ steps.dependencies.outcome }}
-          TRIVY_FS: ${{ steps.trivy-fs.outcome }}
-          HELM_LINT: ${{ steps.helm-lint.outcome }}
-          HELM_TEMPLATE: ${{ steps.helm-template.outcome }}
-          DOCKER_BUILD: ${{ steps.docker-build.outcome }}
-          TRIVY_IMAGE: ${{ steps.trivy-image.outcome }}
-          DOCKER_PUSH: ${{ steps.docker-push.outcome }}
-        run: |
-          $ErrorActionPreference = "Continue"
+          kubectl rollout status deployment/sample-app `
+            --namespace default `
+            --timeout=180s
 
-          $results = [ordered]@{
-            "Python check" = $env:PYTHON
-            "Tools and secrets validation" = $env:VALIDATE
-            "Trivy installation" = $env:TRIVY_INSTALL
-            "SonarQube analysis" = $env:SONAR
-            "Python dependencies" = $env:DEPENDENCIES
-            "Trivy filesystem scan" = $env:TRIVY_FS
-            "Helm chart lint" = $env:HELM_LINT
-            "Helm template validation" = $env:HELM_TEMPLATE
-            "Docker build" = $env:DOCKER_BUILD
-            "Trivy image scan" = $env:TRIVY_IMAGE
-            "Docker Hub push" = $env:DOCKER_PUSH
+          if ($LASTEXITCODE -ne 0) {
+            kubectl get pods -n default -o wide
+            kubectl get events -n default --sort-by=.metadata.creationTimestamp
+            throw "Application rollout failed. Check pod events and deployment logs."
           }
 
-          Write-Host ""
-          Write-Host "========== EFK PIPELINE SUMMARY =========="
-
-          $failures = @()
-
-          foreach ($entry in $results.GetEnumerator()) {
-            $status = $entry.Value
-
-            if ([string]::IsNullOrWhiteSpace($status)) {
-              $status = "skipped"
-            }
-
-            Write-Host ("{0}: {1}" -f $entry.Key, $status)
-
-            if ($status -in @("failure", "cancelled")) {
-              $failures += $entry.Key
-            }
-          }
-
-          Write-Host "=========================================="
-
-          if ($failures.Count -gt 0) {
-            Write-Host "::error::Failed stages: $($failures -join ', ')"
-            exit 1
-          }
-
-          Write-Host "All executed stages succeeded."
+          kubectl get deployment sample-app -n default
+          kubectl get pods -n default
