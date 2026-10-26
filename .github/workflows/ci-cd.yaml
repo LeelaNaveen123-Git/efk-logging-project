@@ -415,20 +415,6 @@ jobs:
             throw "Could not apply Kubernetes image pull secret."
           }
 
-      - name: Deploy using Helm
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          helm upgrade --install sample-app $env:HELM_CHART_PATH `
-            --namespace $env:K8S_NAMESPACE `
-            --set-string "image.repository=$env:IMAGE_REPOSITORY" `
-            --set-string "image.tag=$env:IMAGE_TAG"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Helm deployment failed."
-          }
-
       - name: Configure ECR pull secret on deployment
         shell: powershell
         run: |
