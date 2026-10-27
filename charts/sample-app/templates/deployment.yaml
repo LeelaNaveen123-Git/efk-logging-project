@@ -33,6 +33,9 @@ spec:
         - name: sample-app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: sample-app-credentials
           ports:
             - name: http
               containerPort: {{ .Values.containerPort }}
