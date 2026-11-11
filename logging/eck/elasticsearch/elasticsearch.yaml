@@ -7,7 +7,7 @@ spec:
   version: 9.1.0
   nodeSets:  #Defines one or more groups of Elasticsearch nodes
     - name: default #Names this node group default
-      count: 1 #Requests one Elasticsearch pod in this group
+      count: 0 #Requests one Elasticsearch pod in this group
       config:
         node.store.allow_mmap: false #you disable this memory-mapping behavior for the Elasticsearch node store.
       podTemplate: #Supplies custom pod configuration.
